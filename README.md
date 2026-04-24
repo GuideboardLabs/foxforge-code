@@ -1,6 +1,4 @@
-![Foxforge Banner](docs/images/banner.png)
-
-# Foxforge
+# Foxforge-code
 
 [![CI](https://github.com/GuideboardLabs/Foxforge/actions/workflows/ci.yml/badge.svg)](https://github.com/GuideboardLabs/Foxforge/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
@@ -9,7 +7,7 @@
 ![Status](https://img.shields.io/badge/status-experimental-yellow)
 ![License](https://img.shields.io/badge/license-Service--Only%20Source--Available-orange)
 
-**Self-hosted AI workspace. No API keys. No cloud. No subscriptions. No frontier model calls. Ever.**
+**Local-only terminal coding assistant. No API keys. No cloud. No subscriptions. No frontier model calls. Ever.**
 
 Foxforge is a local-only AI workspace for research, writing, and software generation.
 It routes requests through specialized multi-agent pipelines — each lane a coordinated team of models working in defined stages toward a quality-controlled output. Everything runs on your own hardware, on models you control, with data that never leaves your machine.
