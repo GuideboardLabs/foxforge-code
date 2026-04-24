@@ -1,13 +1,34 @@
+```
+   🭏   🭏
+  ▄██▄▄██
+ ▄███████▄
+ ███▀ ▀███
+ ███   ███
+ ██████████
+ ████████████\
+ ████████████  ███
+ ███   ███ ██  █████
+███   ███ ███   ████
+```
+
 # Foxforge-code
 
-Local-only terminal coding assistant.
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+![Runtime](https://img.shields.io/badge/runtime-local--only-darkgreen)
+![Interface](https://img.shields.io/badge/interface-TUI-orange)
+![Status](https://img.shields.io/badge/status-experimental-yellow)
 
-Foxforge-code is a TUI-first fork focused on coding workflows in the terminal:
-- Project-centric workspace (`/new`, `/open`, `/projects`)
-- Plan and execution loops (`/plan`, `/execute`, `/build`)
-- Stack-aware scaffolding and imports (`/import` + detect mode)
-- Local model routing through `config.ini` (Ollama-first)
+**A local-only terminal coding assistant. No API keys. No cloud. No subscriptions.**
+
+Foxforge-code is a TUI-first fork of [Foxforge](https://github.com/GuideboardLabs/Foxforge) focused on coding workflows. It keeps the project-centric workspace and multi-agent loops, drops the web GUI, and runs entirely against local models through Ollama.
+
+## Highlights
+
+- Project-centric workspace — every session lives in a named project
+- Plan / execute / build loops with stack-aware scaffolding
+- Local model routing via `config.ini` (Ollama-first)
 - Optional Telegram, Discord, and Slack command parity
+- Zero remote API calls. Ever.
 
 ## Quick start
 
@@ -20,30 +41,50 @@ cp config.ini.example config.ini
 python3 -m SourceCode.tui.app
 ```
 
+See [INSTALL_GUIDE.md](INSTALL_GUIDE.md) for the full setup, including Ollama and optional bot integrations.
+
 ## Core commands
 
-- `/new greenfield <name> <description>`
-- `/new import <git-url|path>`
-- `/projects`
-- `/open <slug|id>`
-- `/msg <text>`
-- `/forage <query>`
-- `/plan [prompt]`
-- `/execute --plan <plan_id|latest>`
-- `/build [prompt]`
-- `/stack show|change|save`
-- `/git init|status|commit|push`
-- `/models`
-- `/models set <role> <model>`
-- `/system`
+### Projects
+
+| Command | What it does |
+|---|---|
+| `/new greenfield <name> <description>` | Start a new project from scratch |
+| `/new import <git-url\|path>` | Import an existing codebase |
+| `/projects` | List known projects |
+| `/open <slug\|id>` | Switch into a project |
+
+### Work loops
+
+| Command | What it does |
+|---|---|
+| `/msg <text>` | Chat with the active project |
+| `/forage <query>` | Search project context |
+| `/plan [prompt]` | Produce a plan |
+| `/execute --plan <id\|latest>` | Run a plan |
+| `/build [prompt]` | Plan + execute in one shot |
+
+### System
+
+| Command | What it does |
+|---|---|
+| `/stack show\|change\|save` | Inspect or change the detected stack |
+| `/git init\|status\|commit\|push` | Project-scoped git ops |
+| `/models` / `/models set <role> <model>` | View or reassign model roles |
+| `/system` | Show repo root, paths, and runtime info |
 
 ## Configuration
 
-- `config.ini` is ignored by git and should contain local tokens and model assignments.
-- `config.ini.example` is the tracked template.
-- All model roles are resolved from `[models]` at runtime.
+- `config.ini` is gitignored — put local tokens and per-role model assignments here.
+- `config.ini.example` is the tracked template; copy it and edit.
+- All model roles resolve from `[models]` at runtime, so swapping a single model is a one-line change.
 
 ## Notes
 
-- This fork is terminal-only; the legacy web GUI was removed.
-- `Projects/` is intentionally empty on first run.
+- This fork is terminal-only; the legacy Flask web GUI was removed.
+- `Projects/` is intentionally empty on first run and is gitignored per-project.
+- Bots (Telegram / Discord / Slack) are optional — install with `pip install -r requirements-optional-bots.txt`.
+
+## License
+
+Service-Only Source-Available. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
