@@ -12,6 +12,7 @@ from typing import Any, Callable
 from agents_research.citation_linker import build_retrieved_chunks
 from agents_research.synthesizer import SynthesisUnavailableError, run_skeptic_pass, run_skeptic_pass_with_severity, synthesize
 from shared_tools.answer_composer import evaluate_answer_confidence
+from shared_tools.config_ini import load_config
 from shared_tools.embedding_memory import _vec_cosine
 from shared_tools.file_store import ProjectStore
 from shared_tools.feedback_learning import FeedbackLearningEngine
@@ -505,6 +506,16 @@ LEGAL_ANALYSIS_DIRECTIVE = (
 )
 STATISTICAL_ANALYSIS_MODEL = "qwen3:8b"
 LEGAL_ANALYSIS_MODEL = "qwen3:8b"
+
+
+def _refresh_dynamic_models(repo_root: Path) -> None:
+    global STATISTICAL_ANALYSIS_MODEL, LEGAL_ANALYSIS_MODEL
+    try:
+        cfg = load_config(repo_root)
+        STATISTICAL_ANALYSIS_MODEL = cfg.get_model("research_statistical")
+        LEGAL_ANALYSIS_MODEL = cfg.get_model("research_legal")
+    except Exception:
+        pass
 
 TOPIC_TYPE_TO_PROFILE: dict[str, str] = {
     "sports":         ANALYSIS_PROFILE_SPORTS,
@@ -1692,6 +1703,7 @@ def run_research_pool(
     topic_type: str = "general",
 ) -> dict:
     bus.emit("research_pool", "start", {"question": question, "project": project_slug})
+    _refresh_dynamic_models(repo_root)
 
     def _is_cancelled() -> bool:
         if callable(cancel_checker):

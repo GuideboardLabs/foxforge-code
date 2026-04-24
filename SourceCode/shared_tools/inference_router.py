@@ -1,8 +1,8 @@
 """Inference router that dispatches model calls to Ollama or llama.cpp servers.
 
 Drop-in replacement for OllamaClient — same .chat() / .embed() / .list_local_models() API.
-When ``llama_cpp_servers`` is configured in model_routing.json, matching models are routed
-to a TurboQuant-enabled llama.cpp server; everything else goes through Ollama as usual.
+When ``llama_cpp_servers`` is configured in config.ini ([inference]), matching models are
+routed to a llama.cpp server; everything else goes through Ollama as usual.
 """
 
 from __future__ import annotations

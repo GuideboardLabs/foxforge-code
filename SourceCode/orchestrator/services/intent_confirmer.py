@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from shared_tools.activity_bus import telemetry_emit
+from shared_tools.config_ini import load_config
 from shared_tools.model_routing import load_model_routing
 
 from .make_type_classifier import classify as classify_make_type
@@ -32,6 +33,14 @@ _MODEL = "gemma3:4b"
 _TEMPERATURE = 0.1
 _NUM_CTX = 4096
 _TIMEOUT = 30
+
+
+def _runtime_model_settings(repo_root: Path) -> tuple[str, float, int, int]:
+    try:
+        cfg = load_config(repo_root)
+        return cfg.get_model("intent_confirmer"), _TEMPERATURE, _NUM_CTX, _TIMEOUT
+    except Exception:
+        return _MODEL, _TEMPERATURE, _NUM_CTX, _TIMEOUT
 
 _BUILD_INTENT_TERMS = frozenset({
     "build", "create", "make", "generate", "draft", "design", "redesign",
@@ -336,15 +345,16 @@ def confirm_make_intent(
             f"User message:\n{text[:800]}"
         )
 
+        model_name, temperature, num_ctx, timeout = _runtime_model_settings(repo_root)
         client = OllamaClient()
         raw = client.chat(
-            model=_MODEL,
+            model=model_name,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            temperature=_TEMPERATURE,
-            num_ctx=_NUM_CTX,
+            temperature=temperature,
+            num_ctx=num_ctx,
             think=False,
-            timeout=_TIMEOUT,
+            timeout=timeout,
             retry_attempts=2,
             retry_backoff_sec=1.0,
         )

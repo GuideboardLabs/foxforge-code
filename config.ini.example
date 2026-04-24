@@ -1,0 +1,59 @@
+[app]
+ollama_base_url = http://127.0.0.1:11434
+default_project_root = ./Projects
+
+[models]
+orchestrator_reasoning = deepseek-r1:8b
+reynard_layer = dolphin3:8b
+intent_confirmer = gemma3:4b
+chat_routing_gate = qwen3:4b
+embeddings = qwen3-embedding:4b
+
+research_market_analyst = qwen3:8b
+research_technical = deepseek-r1:8b
+research_risk = deepseek-r1:8b
+research_execution_planner = qwen3:8b
+research_statistical = qwen3:8b
+research_legal = qwen3:8b
+synthesis_default = qwen3:8b
+synthesis_premium = qwen3:14b
+web_query_refiner = qwen3:8b
+web_query_refiner_fallback = deepseek-r1:8b
+
+make_tool_architect = qwen2.5-coder:7b
+make_tool_implementer = qwen2.5-coder:7b
+make_webapp_architect = qwen2.5-coder:14b
+make_webapp_implementer = qwen2.5-coder:14b
+make_webapp_fallback = qwen2.5-coder:7b
+make_desktop_specifier = qwen3:8b
+make_desktop_architect = qwen2.5-coder:14b
+make_desktop_implementer = qwen2.5-coder:14b
+make_desktop_readme = qwen3:8b
+
+plan_deep = qwen2.5-coder:14b
+plan_shallow = qwen2.5-coder:7b
+execute_editor = qwen2.5-coder:14b
+stack_recommender = qwen3:8b
+
+[inference]
+provider = ollama
+llama_cpp_servers =
+
+[integrations.slack]
+enabled = false
+bot_token =
+app_token =
+signing_secret =
+
+[integrations.telegram]
+enabled = false
+bot_token =
+
+[integrations.discord]
+enabled = false
+bot_token =
+
+[integrations.git]
+default_remote_name = origin
+commit_author_name = Foxforge-code
+commit_author_email = foxforge-code@localhost

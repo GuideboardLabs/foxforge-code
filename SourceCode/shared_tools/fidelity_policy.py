@@ -38,7 +38,7 @@ _TYPE_BASELINE: dict[str, FidelityLevel] = {
     "finance":       FidelityLevel.STRICT,
     "sports":        FidelityLevel.STRICT,
     "history":       FidelityLevel.STRICT,
-    # essay_pool target strings
+    # legacy document target strings
     "essay":         FidelityLevel.STRICT,
     "report":        FidelityLevel.STRICT,
     "brief":         FidelityLevel.STRICT,

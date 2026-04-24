@@ -9,3 +9,4 @@ sentence-transformers>=3.0,<4.0
 scikit-learn>=1.4,<2.0
 textual>=0.80
 rich>=13
+slack-bolt>=1.18

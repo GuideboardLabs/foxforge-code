@@ -22,7 +22,7 @@ from shared_tools.file_store import ProjectStore
 from shared_tools.fact_policy import enrich_source_metadata, detect_topic_type, classify_fact_volatility
 from shared_tools.domain_reputation import DomainReputation
 from shared_tools.inference_router import InferenceRouter
-from shared_tools.model_routing import load_model_routing
+from shared_tools.model_routing import lane_model_config, load_model_routing
 from shared_tools.web_cache import WebQueryCache, cache_key as build_cache_key, normalize_query as normalize_cache_query, settings_digest as build_settings_digest
 
 
@@ -1708,8 +1708,9 @@ class WebResearchEngine:
             user_prompt += f"\n\nProject context:\n{context_block}"
         try:
             router = InferenceRouter(self.repo_root)
+            cfg = lane_model_config(self.repo_root, "web_query_refiner") or {}
             raw = router.chat(
-                model="qwen3:8b",
+                model=str(cfg.get("model", "qwen3:8b")),
                 system_prompt=self._SMART_QUERY_SYSTEM,
                 user_prompt=user_prompt,
                 temperature=0.0,
@@ -1718,7 +1719,7 @@ class WebResearchEngine:
                 timeout=25,
                 retry_attempts=1,
                 retry_backoff_sec=0.5,
-                fallback_models=["deepseek-r1:8b"],
+                fallback_models=cfg.get("fallback_models", ["deepseek-r1:8b"]),
             )
         except Exception:
             return []
@@ -1968,8 +1969,9 @@ class WebResearchEngine:
             return [base] if base else []
         try:
             router = InferenceRouter(self.repo_root)
+            cfg = lane_model_config(self.repo_root, "web_query_refiner") or {}
             raw = router.chat(
-                model="qwen3:8b",
+                model=str(cfg.get("model", "qwen3:8b")),
                 system_prompt=self._DECOMPOSE_SYSTEM,
                 user_prompt=base,
                 temperature=0.0,
@@ -1978,7 +1980,7 @@ class WebResearchEngine:
                 timeout=10,
                 retry_attempts=1,
                 retry_backoff_sec=0.5,
-                fallback_models=["deepseek-r1:8b"],
+                fallback_models=cfg.get("fallback_models", ["deepseek-r1:8b"]),
             )
         except Exception:
             return [base]
@@ -2149,8 +2151,9 @@ class WebResearchEngine:
         user_prompt = f"Query: {base}\n\nSearch results so far:\n{source_summary}"
         try:
             router = InferenceRouter(self.repo_root)
+            cfg = lane_model_config(self.repo_root, "web_query_refiner") or {}
             raw = router.chat(
-                model="qwen3:8b",
+                model=str(cfg.get("model", "qwen3:8b")),
                 system_prompt=self._FOLLOWUP_SYSTEM,
                 user_prompt=user_prompt,
                 temperature=0.0,
@@ -2159,7 +2162,7 @@ class WebResearchEngine:
                 timeout=10,
                 retry_attempts=1,
                 retry_backoff_sec=0.5,
-                fallback_models=["deepseek-r1:8b"],
+                fallback_models=cfg.get("fallback_models", ["deepseek-r1:8b"]),
             )
         except Exception:
             return []

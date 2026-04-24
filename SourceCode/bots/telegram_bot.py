@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from bots.command_router import BotCommandRouter, chunk_text
 
 LOGGER = logging.getLogger(__name__)
 
 _TG_API = "https://api.telegram.org/bot{token}/{method}"
 _POLL_TIMEOUT = 25  # seconds for long-polling
 _TYPING_INTERVAL = 4  # re-send typing action every N seconds
-_HISTORY_LIMIT = 20  # conversation messages to pass as context
 _PENDING_MAX = 20  # max unauthorized user IDs to remember
 
 # Module-level store of recent unauthorized user IDs, read by the API
@@ -33,6 +33,7 @@ class TelegramBot(threading.Thread):
         self._repo_root = repo_root
         self._token = token
         self._stop = threading.Event()
+        self._router = BotCommandRouter(self._repo_root)
         # Lazy imports to avoid circular deps at startup
         self._user_store: Any = None
         self._auth_store: Any = None
@@ -115,25 +116,10 @@ class TelegramBot(threading.Thread):
             self._send_message(chat_id, chunk)
 
     def _run_orchestrator(self, mapping: dict[str, Any], text: str) -> str:
-        from shared_tools.conversation_store import ConversationStore
-        from orchestrator.main import FoxforgeOrchestrator
-
-        uid = mapping["foxforge_user_id"]
-        conv_id = mapping["conversation_id"]
-
-        store = ConversationStore(self._repo_root, uid)
-        conv = store.get(conv_id)
-        history: list[dict] = []
-        if conv and isinstance(conv.get("messages"), list):
-            history = conv["messages"][-_HISTORY_LIMIT:]
-
-        store.add_message(conv_id, "user", text, mode="talk")
-
-        orch = FoxforgeOrchestrator(self._repo_root)
-        reply = orch.conversation_reply(text, history=history, project="general")
-
-        store.add_message(conv_id, "assistant", reply, mode="talk")
-        return reply
+        platform_user = str(mapping.get("platform_user_id", "")).strip() or str(mapping.get("foxforge_user_id", "")).strip() or "telegram-user"
+        active_project = str(mapping.get("active_project", "general")).strip() or "general"
+        routed = self._router.dispatch(platform="telegram", user=platform_user, project=active_project, text=text)
+        return routed.text or ""
 
     # ------------------------------------------------------------------ #
     # Telegram API helpers
@@ -176,19 +162,4 @@ class TelegramBot(threading.Thread):
 # ------------------------------------------------------------------ #
 
 def _chunk_text(text: str, limit: int) -> list[str]:
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        # Try to split on a paragraph boundary
-        split_at = text.rfind("\n\n", 0, limit)
-        if split_at == -1:
-            split_at = text.rfind("\n", 0, limit)
-        if split_at == -1:
-            split_at = limit
-        chunks.append(text[:split_at].strip())
-        text = text[split_at:].strip()
-    return [c for c in chunks if c]
+    return chunk_text(text, limit)

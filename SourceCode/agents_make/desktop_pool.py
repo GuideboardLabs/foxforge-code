@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from shared_tools.config_ini import load_config
 from shared_tools.ollama_client import OllamaClient
 
 
@@ -42,6 +43,19 @@ _MODEL_IMPL   = "qwen2.5-coder:14b"
 _MODEL_README = "qwen3:8b"
 # Fallback if upgraded model unavailable
 _MODEL_IMPL_FALLBACK = "qwen2.5-coder:7b"
+
+
+def _resolve_models(repo_root: Path) -> None:
+    global _MODEL_SPEC, _MODEL_ARCH, _MODEL_IMPL, _MODEL_README, _MODEL_IMPL_FALLBACK
+    try:
+        cfg = load_config(repo_root)
+        _MODEL_SPEC = cfg.get_model("make_desktop_specifier")
+        _MODEL_ARCH = cfg.get_model("make_desktop_architect")
+        _MODEL_IMPL = cfg.get_model("make_desktop_implementer")
+        _MODEL_README = cfg.get_model("make_desktop_readme")
+        _MODEL_IMPL_FALLBACK = cfg.get_model("make_webapp_fallback")
+    except Exception:
+        pass
 
 
 def _today() -> str:
@@ -427,6 +441,7 @@ def run_desktop_pool(
         return False
 
     bus.emit("desktop_pool", "start", {"question": question})
+    _resolve_models(repo_root)
     client = OllamaClient()
 
     _progress("build_pool_started", {

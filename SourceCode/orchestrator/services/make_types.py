@@ -8,25 +8,6 @@ MAKE_TYPES: tuple[str, ...] = (
     "tool",
     "web_app",
     "desktop_app",
-    "social_post",
-    "email",
-    "blog",
-    "essay_short",
-    "essay_long",
-    "guide",
-    "tutorial",
-    "video_script",
-    "newsletter",
-    "press_release",
-    "novel_chapter",
-    "memoir_chapter",
-    "book_chapter",
-    "screenplay",
-    "medical",
-    "finance",
-    "sports",
-    "history",
-    "game_design_doc",
 )
 
 _MAKE_TYPES_SET = set(MAKE_TYPES)
@@ -57,4 +38,3 @@ def make_types_prompt_fragment() -> str:
 def make_types_hash() -> str:
     joined = "|".join(MAKE_TYPES)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
-

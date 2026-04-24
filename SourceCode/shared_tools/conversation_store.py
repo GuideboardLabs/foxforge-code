@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,81 +13,15 @@ def _now_iso() -> str:
 
 
 def _clean_title(text: str) -> str:
-    compact = " ".join(text.strip().split())
+    compact = " ".join(str(text or "").strip().split())
     if not compact:
-        return "New Chat"
+        return "Project Chat"
     return compact if len(compact) <= 64 else f"{compact[:61]}..."
 
 
-def _is_default_auto_title(text: str) -> bool:
-    title = _clean_title(str(text or ""))
-    return title in {"New Chat", "General Chat"}
-
-
 def _clean_project(text: str) -> str:
-    compact = "_".join(text.strip().split())
-    if not compact:
-        return "general"
-    return compact.lower()
-
-
-def _clean_topic_id(value: Any) -> str:
-    compact = str(value or "").strip()
-    return compact or "general"
-
-
-def _clean_image_style(value: Any) -> str:
-    style = str(value or "").strip().lower()
-    if style in {"realistic", "lora"}:
-        return style
-    return "realistic"
-
-
-def _clean_selected_loras(value: Any) -> list[str]:
-    raw_items = value if isinstance(value, (list, tuple, set)) else []
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in raw_items:
-        text = str(item or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        out.append(text[:220])
-        if len(out) >= 32:
-            break
-    return out
-
-
-def _slugify(text: str) -> str:
-    slug = re.sub(r"[^\w\s-]", "", text.lower().strip())
-    return re.sub(r"[\s_-]+", "_", slug).strip("_")[:60]
-
-
-def _first_user_title_candidate(messages: Any) -> str:
-    rows = messages if isinstance(messages, list) else []
-    for row in rows:
-        if str((row or {}).get("role", "")).strip().lower() != "user":
-            continue
-        raw = str((row or {}).get("content", "")).strip()
-        if raw.startswith("/talk "):
-            raw = raw[len("/talk ") :].strip()
-        if not raw or raw.startswith("/"):
-            continue
-        return _clean_title(raw)
-    return ""
-
-
-def _infer_title_manually_set(data: dict[str, Any]) -> bool:
-    stored = data.get("title_manually_set")
-    if isinstance(stored, bool):
-        return stored
-    title = _clean_title(str(data.get("title", "New Chat")))
-    if _is_default_auto_title(title):
-        return False
-    first_user_title = _first_user_title_candidate(data.get("messages", []))
-    if first_user_title and title == first_user_title:
-        return False
-    return True
+    compact = "-".join(str(text or "").strip().split())
+    return compact.lower() or "general"
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -147,64 +80,53 @@ class ConversationStore:
 
     @classmethod
     def _decorate(cls, data: dict[str, Any]) -> dict[str, Any]:
-        if not str(data.get("topic_id", "")).strip():
-            data["topic_id"] = "general" if str(data.get("project", "general")).strip() == "general" else ""
-        data["path"] = str(data.get("path", "")).strip()
-        data["title_manually_set"] = _infer_title_manually_set(data)
-        data["image_style"] = _clean_image_style(data.get("image_style", "realistic"))
-        data["selected_loras"] = _clean_selected_loras(data.get("selected_loras", []))
-        if data["selected_loras"] and data["image_style"] == "realistic":
-            data["image_style"] = "lora"
         unread_count = cls._assistant_unread_count(data)
         data["last_read_message_id"] = str(data.get("last_read_message_id", "")).strip()
         data["unread_count"] = unread_count
         data["has_unread"] = unread_count > 0
+        data["project"] = _clean_project(data.get("project", "general"))
+        # stripped legacy fields for project-only TUI
+        data.pop("topic_id", None)
+        data.pop("path", None)
+        data.pop("title_manually_set", None)
+        data.pop("image_style", None)
+        data.pop("selected_loras", None)
         return data
 
-    def _generate_path(self, topic_slug: str, title: str) -> str:
-        if not topic_slug or topic_slug == "general":
-            return ""
-        title_slug = _slugify(title) or "untitled"
-        base = f"/{topic_slug}/{title_slug}"
-        existing: set[str] = set()
-        for path in self.root.glob("*.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                p = str(data.get("path", "")).strip()
-                if p:
-                    existing.add(p)
-            except (json.JSONDecodeError, OSError):
-                continue
-        if base not in existing:
-            return base
-        for i in range(2, 100):
-            candidate = f"{base}_{i}"
-            if candidate not in existing:
-                return candidate
-        return f"{base}_{uuid.uuid4().hex[:6]}"
-
-    def create(self, title: str = "New Chat", project: str = "general", topic_id: str = "general", path: str = "") -> dict[str, Any]:
+    def get_or_create_for_project(self, project_slug: str, *, title: str = "Project Chat") -> dict[str, Any]:
+        project = _clean_project(project_slug)
         with self.lock:
+            for path in self.root.glob("*.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if _clean_project(payload.get("project", "general")) == project:
+                    return self._decorate(payload)
+
             now = _now_iso()
-            conversation_id = uuid.uuid4().hex[:12]
-            clean_title = _clean_title(title)
             data = {
-                "id": conversation_id,
-                "title": clean_title,
-                "project": _clean_project(project),
-                "topic_id": _clean_topic_id(topic_id),
-                "path": str(path).strip(),
+                "id": uuid.uuid4().hex[:12],
+                "title": _clean_title(title),
+                "project": project,
                 "created_at": now,
                 "updated_at": now,
                 "summary": "",
                 "messages": [],
                 "last_read_message_id": "",
-                "title_manually_set": not _is_default_auto_title(clean_title),
-                "image_style": "realistic",
-                "selected_loras": [],
             }
             self._save(data)
             return self._decorate(data)
+
+    def create(
+        self,
+        title: str = "Project Chat",
+        project: str = "general",
+        topic_id: str = "",
+        path: str = "",
+    ) -> dict[str, Any]:
+        _ = (topic_id, path)
+        return self.get_or_create_for_project(project_slug=project, title=title)
 
     def get(self, conversation_id: str) -> dict[str, Any] | None:
         with self.lock:
@@ -214,12 +136,12 @@ class ConversationStore:
             return self._decorate(data)
 
     def rename(self, conversation_id: str, title: str, *, manual: bool = True) -> dict[str, Any] | None:
+        _ = manual
         with self.lock:
             data = self._load(conversation_id)
             if data is None:
                 return None
             data["title"] = _clean_title(title)
-            data["title_manually_set"] = bool(manual)
             data["updated_at"] = _now_iso()
             self._save(data)
             return self._decorate(data)
@@ -235,23 +157,19 @@ class ConversationStore:
             return self._decorate(data)
 
     def set_path(self, conversation_id: str, path: str) -> dict[str, Any] | None:
+        _ = path
         with self.lock:
             data = self._load(conversation_id)
             if data is None:
                 return None
-            data["path"] = str(path).strip()
-            data["updated_at"] = _now_iso()
-            self._save(data)
             return self._decorate(data)
 
     def set_topic(self, conversation_id: str, topic_id: str) -> dict[str, Any] | None:
+        _ = topic_id
         with self.lock:
             data = self._load(conversation_id)
             if data is None:
                 return None
-            data["topic_id"] = _clean_topic_id(topic_id)
-            data["updated_at"] = _now_iso()
-            self._save(data)
             return self._decorate(data)
 
     def set_image_preferences(
@@ -261,27 +179,11 @@ class ConversationStore:
         image_style: str | None = None,
         selected_loras: list[str] | None = None,
     ) -> dict[str, Any] | None:
+        _ = (image_style, selected_loras)
         with self.lock:
             data = self._load(conversation_id)
             if data is None:
                 return None
-
-            if image_style is not None:
-                cleaned_style = _clean_image_style(image_style)
-                data["image_style"] = cleaned_style
-                if cleaned_style == "realistic" and selected_loras is None:
-                    data["selected_loras"] = []
-
-            if selected_loras is not None:
-                cleaned_loras = _clean_selected_loras(selected_loras)
-                data["selected_loras"] = cleaned_loras
-                if cleaned_loras:
-                    data["image_style"] = "lora"
-                elif image_style is None and str(data.get("image_style", "")).strip().lower() == "lora":
-                    data["image_style"] = "realistic"
-
-            data["updated_at"] = _now_iso()
-            self._save(data)
             return self._decorate(data)
 
     def delete(self, conversation_id: str) -> bool:
@@ -325,23 +227,7 @@ class ConversationStore:
             if request_id:
                 message["request_id"] = str(request_id).strip()
             if attachments:
-                safe_attachments: list[dict[str, Any]] = []
-                for item in attachments:
-                    if not isinstance(item, dict):
-                        continue
-                    row = {
-                        "id": str(item.get("id", "")).strip(),
-                        "type": str(item.get("type", "")).strip().lower() or "file",
-                        "name": str(item.get("name", "")).strip(),
-                        "filename": str(item.get("filename", "")).strip(),
-                        "mime": str(item.get("mime", "")).strip().lower(),
-                        "url": str(item.get("url", "")).strip(),
-                        "size": int(item.get("size", 0)) if str(item.get("size", "")).strip() else 0,
-                        "model_family": str(item.get("model_family", "")).strip().lower(),
-                    }
-                    safe_attachments.append(row)
-                if safe_attachments:
-                    message["attachments"] = safe_attachments
+                message["attachments"] = [row for row in attachments if isinstance(row, dict)]
             if meta and isinstance(meta, dict):
                 message["meta"] = {k: v for k, v in meta.items() if v is not None}
             if reply_to and isinstance(reply_to, dict):
@@ -350,19 +236,9 @@ class ConversationStore:
                     "role": str(reply_to.get("role", "")).strip(),
                     "excerpt": str(reply_to.get("excerpt", ""))[:300].strip(),
                 }
-            data["messages"].append(message)
+
+            data.setdefault("messages", []).append(message)
             data["updated_at"] = _now_iso()
-
-            current_title = _clean_title(str(data.get("title", "New Chat")))
-            manual_title = _infer_title_manually_set(data)
-            if role == "user" and not manual_title and _is_default_auto_title(current_title):
-                raw = content.strip()
-                if raw.startswith("/talk "):
-                    raw = raw[len("/talk ") :].strip()
-                if raw and not raw.startswith("/"):
-                    data["title"] = _clean_title(raw)
-                    data["title_manually_set"] = False
-
             self._save(data)
             return message
 
@@ -378,10 +254,7 @@ class ConversationStore:
             data = self._load(conversation_id)
             if data is None:
                 return None
-            safe_messages: list[dict[str, Any]] = []
-            for row in messages or []:
-                if isinstance(row, dict):
-                    safe_messages.append(json.loads(json.dumps(row, ensure_ascii=True)))
+            safe_messages = [json.loads(json.dumps(row, ensure_ascii=True)) for row in (messages or []) if isinstance(row, dict)]
             data["messages"] = safe_messages
             if summary is not None:
                 data["summary"] = str(summary).strip()[:600]
@@ -397,10 +270,7 @@ class ConversationStore:
             if data is None:
                 return None
             messages = data.get("messages") if isinstance(data.get("messages"), list) else []
-            if messages:
-                data["last_read_message_id"] = str(messages[-1].get("id", "")).strip()
-            else:
-                data["last_read_message_id"] = ""
+            data["last_read_message_id"] = str(messages[-1].get("id", "")).strip() if messages else ""
             self._save(data)
             return self._decorate(data)
 
@@ -431,30 +301,20 @@ class ConversationStore:
                 messages = data.get("messages") or []
                 last_preview = ""
                 if messages:
-                    content = str(messages[-1].get("content", ""))
-                    low = content.lower().strip()
-                    if low == "/talk":
-                        content = ""
-                    elif low.startswith("/talk "):
-                        content = content[6:]
-                    compact = " ".join(content.split())
+                    compact = " ".join(str(messages[-1].get("content", "")).split())
                     last_preview = compact[:90]
-                summary_raw = str(data.get("summary", ""))
                 unread_count = self._assistant_unread_count(data)
                 items.append(
                     {
                         "id": data.get("id", path.stem),
-                        "title": data.get("title", "New Chat"),
-                        "project": data.get("project", "general"),
-                        "topic_id": data.get("topic_id", "general" if str(data.get("project", "general")).strip() == "general" else ""),
-                        "path": str(data.get("path", "")).strip(),
+                        "title": data.get("title", "Project Chat"),
+                        "project": _clean_project(data.get("project", "general")),
                         "created_at": data.get("created_at", ""),
                         "updated_at": data.get("updated_at", ""),
                         "message_count": len(messages),
                         "last_preview": last_preview,
-                        "summary": summary_raw[:200],
+                        "summary": str(data.get("summary", ""))[:200],
                         "last_read_message_id": str(data.get("last_read_message_id", "")).strip(),
-                        "title_manually_set": _infer_title_manually_set(data),
                         "unread_count": unread_count,
                         "has_unread": unread_count > 0,
                     }

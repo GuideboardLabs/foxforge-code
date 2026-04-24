@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from shared_tools.config_ini import load_config
 from shared_tools.feedback_learning import FeedbackLearningEngine
 from shared_tools.file_store import ProjectStore
 from shared_tools.model_routing import lane_model_config
@@ -117,6 +118,7 @@ def _run_fix_agent(
     error_text: str,
     question: str,
     cancel_checker: Callable[[], bool] | None,
+    model_name: str,
 ) -> str:
     """Ask the model to fix code given an error. Returns fixed code or original if it fails."""
     if callable(cancel_checker):
@@ -140,7 +142,7 @@ def _run_fix_agent(
     )
     try:
         result = client.chat(
-            model="qwen2.5-coder:7b",
+            model=str(model_name or "qwen2.5-coder:7b"),
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.1,
@@ -161,6 +163,7 @@ def _generate_test_harness(
     code: str,
     question: str,
     cancel_checker: Callable[[], bool] | None,
+    model_name: str,
 ) -> str:
     """Generate a test block appended to the tool code that verifies logic, not just crash-free.
 
@@ -196,7 +199,7 @@ def _generate_test_harness(
     )
     try:
         result = client.chat(
-            model="qwen2.5-coder:7b",
+            model=str(model_name or "qwen2.5-coder:7b"),
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.15,
@@ -294,7 +297,13 @@ def run_tool_pool(
     bus.emit("tool_pool", "start", {"question": question, "project": project_slug})
     _progress("tool_pool_started", {"agents_total": len(_TOOL_AGENTS), "project": project_slug})
 
-    cfg = lane_model_config(repo_root, "ui_pool") or {}
+    cfg = lane_model_config(repo_root, "make_tool") or {}
+    try:
+        config_ini = load_config(repo_root)
+        _TOOL_AGENTS[0]["model"] = config_ini.get_model("make_tool_architect")
+        _TOOL_AGENTS[1]["model"] = config_ini.get_model("make_tool_implementer")
+    except Exception:
+        pass
     client = OllamaClient()
     orchestrator_cfg = lane_model_config(repo_root, "orchestrator_reasoning")
     learning = FeedbackLearningEngine(repo_root, client=client, model_cfg=orchestrator_cfg)
@@ -349,7 +358,14 @@ def run_tool_pool(
                     "error_preview": error_summary[:200],
                 })
                 _progress("tool_fix_cycle_started", {"cycle": fix_cycle, "total": _MAX_FIX_CYCLES})
-                code = _run_fix_agent(client, code, error_summary, question, cancel_checker)
+                code = _run_fix_agent(
+                    client,
+                    code,
+                    error_summary,
+                    question,
+                    cancel_checker,
+                    model_name=str(cfg.get("model", "qwen2.5-coder:7b")),
+                )
                 cycles_used = fix_cycle
                 _progress("tool_fix_cycle_completed", {"cycle": fix_cycle, "total": _MAX_FIX_CYCLES})
                 success, last_stdout, last_stderr = _run_code(code)
@@ -375,7 +391,13 @@ def run_tool_pool(
 
     if exec_status == "passed" and code and not _is_cancelled():
         _progress("tool_test_harness_started", {"message": "Generating logic test..."})
-        test_harness_code = _generate_test_harness(client, code, question, cancel_checker)
+        test_harness_code = _generate_test_harness(
+            client,
+            code,
+            question,
+            cancel_checker,
+            model_name=str(cfg.get("model", "qwen2.5-coder:7b")),
+        )
 
         if test_harness_code and not _is_cancelled():
             combined = code + "\n\n# --- Test harness ---\n" + test_harness_code
@@ -397,7 +419,14 @@ def run_tool_pool(
                         f"Test code that failed:\n{test_harness_code[:600]}"
                     )
                     _progress("tool_test_harness_fix_started", {})
-                    code = _run_fix_agent(client, code, logic_error, question, cancel_checker)
+                    code = _run_fix_agent(
+                        client,
+                        code,
+                        logic_error,
+                        question,
+                        cancel_checker,
+                        model_name=str(cfg.get("model", "qwen2.5-coder:7b")),
+                    )
                     retest_ok, retest_stdout, retest_stderr = _run_code(
                         code + "\n\n# --- Test harness ---\n" + test_harness_code
                     )

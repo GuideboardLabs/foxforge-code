@@ -7,6 +7,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from shared_tools.config_ini import load_config
+
 _TOKEN_RE = re.compile(r'[a-z0-9]{3,}')
 _STOP = {'the','and','for','with','from','that','this','have','into','what','when','where','who','your','about'}
 
@@ -61,6 +63,13 @@ class EmbeddingMemory:
 
     def __init__(self, repo_root: Path) -> None:
         self.repo_root = Path(repo_root)
+
+    def _embed_model(self) -> str:
+        try:
+            cfg = load_config(self.repo_root)
+            return cfg.get_model("embeddings")
+        except Exception:
+            return _EMBED_MODEL
 
     def _summary_files(self, project: str) -> list[Path]:
         root = self.repo_root / 'Projects' / (project.strip() or 'general') / 'research_summaries'
@@ -122,7 +131,8 @@ class EmbeddingMemory:
         *,
         limit: int,
     ) -> list[dict[str, Any]]:
-        query_vec = client.embed(_EMBED_MODEL, query[:2000])
+        embed_model = self._embed_model()
+        query_vec = client.embed(embed_model, query[:2000])
         cache = self._load_cache(project)
         cache_dirty = False
         # best section hit per file: path → {score, preview}
@@ -141,7 +151,7 @@ class EmbeddingMemory:
                     if entry and abs(float(entry.get("mtime", 0)) - mtime) < 1.0:
                         vec = entry["vector"]
                     else:
-                        vec = client.embed(_EMBED_MODEL, section)
+                        vec = client.embed(embed_model, section)
                         cache[key] = {"mtime": mtime, "vector": vec}
                         cache_dirty = True
 

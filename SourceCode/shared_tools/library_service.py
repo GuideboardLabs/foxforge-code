@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from shared_tools.config_ini import load_config
 from shared_tools.db import connect, row_to_dict
 from shared_tools.document_ingestion import extract_text
 from shared_tools.migrations import initialize_database
@@ -94,6 +95,20 @@ class LibraryService:
     def _connect(self):
         return connect(self.repo_root)
 
+    def _embed_model(self) -> str:
+        try:
+            cfg = load_config(self.repo_root)
+            return cfg.get_model("embeddings")
+        except Exception:
+            return _EMBED_MODEL
+
+    def _orchestrator_model(self) -> str:
+        try:
+            cfg = load_config(self.repo_root)
+            return cfg.get_model("orchestrator_reasoning")
+        except Exception:
+            return ""
+
     def _topic_engine(self) -> TopicEngine:
         return TopicEngine(self.repo_root)
 
@@ -115,7 +130,7 @@ class LibraryService:
         return _slugify(key, limit=80)
 
     def _load_topics(self) -> list[dict[str, Any]]:
-        path = self.repo_root / "Runtime" / "topics" / "topics.json"
+        path = self.repo_root / "Runtime" / "projects" / "projects.json"
         if not path.exists():
             return []
         try:
@@ -616,7 +631,7 @@ class LibraryService:
 
     def _try_embed(self, text: str) -> list[float] | None:
         try:
-            return OllamaClient().embed(_EMBED_MODEL, text, timeout=3)
+            return OllamaClient().embed(self._embed_model(), text, timeout=3)
         except Exception:
             return None
 
@@ -736,16 +751,7 @@ class LibraryService:
         return "\n\n".join(snippets)[:1400] or "No summary available."
 
     def _model_summary(self, *, title: str, markdown_text: str) -> str:
-        model_cfg_path = self.repo_root / "SourceCode" / "configs" / "model_routing.json"
-        model = ""
-        if model_cfg_path.exists():
-            try:
-                payload = json.loads(model_cfg_path.read_text(encoding="utf-8"))
-                row = payload.get("orchestrator_reasoning") if isinstance(payload, dict) else {}
-                if isinstance(row, dict):
-                    model = str(row.get("model", "")).strip()
-            except (json.JSONDecodeError, OSError):
-                model = ""
+        model = self._orchestrator_model()
         if not model:
             return ""
         prompt = (
@@ -865,7 +871,7 @@ class LibraryService:
                     continue
                 embedding_json = ""
                 try:
-                    vec = client.embed(_EMBED_MODEL, chunk_text[:2000], timeout=3)
+                    vec = client.embed(self._embed_model(), chunk_text[:2000], timeout=3)
                     embedding_json = json.dumps(vec, ensure_ascii=True)
                 except Exception:
                     embedding_json = ""

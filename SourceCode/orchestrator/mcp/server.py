@@ -59,7 +59,7 @@ def run_http(repo_root: Path, *, host: str = "127.0.0.1", port: int = 9876) -> N
     if not ack:
         raise RuntimeError(
             "HTTP MCP transport requires explicit acknowledgement: set "
-            "`mcp.acknowledge_unsafe_http=true` in model_routing.json."
+            "`mcp.acknowledge_unsafe_http=true` in config.ini ([inference])."
         )
     token_path = Path(repo_root) / "Runtime" / "state" / "mcp_token"
     token = token_path.read_text(encoding="utf-8").strip() if token_path.exists() else ""

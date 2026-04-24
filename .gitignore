@@ -45,6 +45,7 @@ Runtime/learning/*
 
 # Environment variants (.env.local, .env.production, etc.)
 .env.*
+config.ini
 
 # Key / certificate files
 *.pem
