@@ -1291,8 +1291,8 @@ class WebResearchEngine:
                         "fresh_runs_history_limit": 6,
                         "fresh_runs_min_new_domains": 4,
                         "conflict_detection_enabled": True,
-                        "crawl_relevance_gating_enabled": False,
-                        "crawl_relevance_min_score": 0.1,
+                        "crawl_relevance_gating_enabled": True,
+                        "crawl_relevance_min_score": 0.25,
                         "searxng_base_url": "http://127.0.0.1:8080",
                         "searxng_timeout_sec": 20,
                         "searxng_engines": "",
@@ -1302,6 +1302,7 @@ class WebResearchEngine:
                         "crawl_depth": 2,
                         "crawl_max_pages": 18,
                         "crawl_links_per_page": 8,
+                        "crawl_deep_follow_seeds": 3,
                         "crawl_timeout_sec": 0,
                         "crawl4ai_enabled": True,
                         "crawl4ai_base_url": "http://127.0.0.1:11235",
@@ -1496,6 +1497,12 @@ class WebResearchEngine:
         data["crawl_links_per_page"] = max(1, min(crawl_links_per_page, 30))
 
         try:
+            crawl_deep_follow_seeds = int(data.get("crawl_deep_follow_seeds", 3))
+        except (TypeError, ValueError):
+            crawl_deep_follow_seeds = 3
+        data["crawl_deep_follow_seeds"] = max(0, min(crawl_deep_follow_seeds, 10))
+
+        try:
             crawl_timeout_sec = int(data.get("crawl_timeout_sec", 0))
         except (TypeError, ValueError):
             crawl_timeout_sec = 0
@@ -1681,6 +1688,7 @@ class WebResearchEngine:
             f"- crawl_depth: {settings.get('crawl_depth', 2)}\n"
             f"- crawl_max_pages: {settings.get('crawl_max_pages', 18)}\n"
             f"- crawl_links_per_page: {settings.get('crawl_links_per_page', 8)}\n"
+            f"- crawl_deep_follow_seeds: {settings.get('crawl_deep_follow_seeds', 3)}\n"
             f"- crawl_timeout_sec: {settings.get('crawl_timeout_sec', 12)}\n"
             f"- crawl4ai_enabled: {settings.get('crawl4ai_enabled', True)}\n"
             f"- crawl4ai_base_url: {settings.get('crawl4ai_base_url', 'http://127.0.0.1:11235')}\n"
@@ -2318,91 +2326,75 @@ class WebResearchEngine:
         selected: list[dict[str, str]] = []
         selected_urls: set[str] = set()
 
-        def _pick_for_variant(variant: str, limit: int) -> int:
-            if limit <= 0:
-                return 0
-            count = 0
-            for row in by_variant.get(variant, []):
-                url_value = self._normalize_url(str(row.get("url", "")).strip())
-                if not url_value or url_value in selected_urls:
-                    continue
-                if bool(row.get("quality_blocked", False)):
-                    continue
-                # Skip tier3 seeds with suspiciously short snippets — likely stubs,
-                # redirects, or login walls. Tier1/tier2 get authority override.
-                _tier = str(row.get("source_tier", "tier3")).strip().lower()
-                if _tier == "tier3" and len(str(row.get("snippet", "")).strip()) < 35:
-                    continue
-                selected_urls.add(url_value)
-                payload: dict[str, str] = {
+        primary_quota = max(1, int(stats["primary_quota"]))
+        extra_quota_min = max(1, int(stats["extra_quota_min"]))
+        extra_quota_max = max(extra_quota_min, int(stats["extra_quota_max"]))
+        extra_variants = ordered_variants[1:]
+
+        # Global target: same total the old per-slot quota would produce.
+        target = primary_quota + extra_quota_max * len(extra_variants)
+        # Per-variant cap: no single variant can claim more than primary_quota slots,
+        # preventing one good-query variant from monopolising the seed pool.
+        per_variant_cap = primary_quota
+
+        variant_selected_counts: dict[str, int] = {}
+        all_candidates = sorted(scored_rows, key=_rank_key)
+
+        def _try_add(row: dict[str, Any]) -> bool:
+            url_value = self._normalize_url(str(row.get("url", "")).strip())
+            if not url_value or url_value in selected_urls:
+                return False
+            if bool(row.get("quality_blocked", False)):
+                return False
+            _tier = str(row.get("source_tier", "tier3")).strip().lower()
+            if _tier == "tier3" and len(str(row.get("snippet", "")).strip()) < 35:
+                return False
+            variant = str(row.get("query_variant", "")).strip() or primary_variant
+            selected_urls.add(url_value)
+            selected.append(
+                {
                     "title": str(row.get("title", "")).strip() or url_value,
                     "url": url_value,
                     "snippet": str(row.get("snippet", "")).strip(),
                     "query_variant": variant,
                 }
-                selected.append(payload)
-                count += 1
-                if count >= limit:
-                    break
-            return count
-
-        primary_quota = max(1, int(stats["primary_quota"]))
-        extra_quota_min = max(1, int(stats["extra_quota_min"]))
-        extra_quota_max = max(extra_quota_min, int(stats["extra_quota_max"]))
-        selected_by_variant: list[dict[str, Any]] = []
-
-        picked_primary = _pick_for_variant(primary_variant, primary_quota)
-        selected_by_variant.append(
-            {
-                "variant": primary_variant,
-                "quota": primary_quota,
-                "selected": picked_primary,
-                "available": len(by_variant.get(primary_variant, [])),
-            }
-        )
-
-        extra_variants = ordered_variants[1:]
-        for variant in extra_variants:
-            picked = _pick_for_variant(variant, extra_quota_max)
-            selected_by_variant.append(
-                {
-                    "variant": variant,
-                    "quota_min": extra_quota_min,
-                    "quota_max": extra_quota_max,
-                    "selected": picked,
-                    "available": len(by_variant.get(variant, [])),
-                }
             )
+            variant_selected_counts[variant] = variant_selected_counts.get(variant, 0) + 1
+            return True
 
-        # Floor fill: try to satisfy at least (5 + 2 per extra variant) when possible.
-        minimum_target = primary_quota + (extra_quota_min * len(extra_variants))
-        if len(selected) < minimum_target:
-            spillover = sorted(scored_rows, key=_rank_key)
-            for row in spillover:
-                if len(selected) >= minimum_target:
+        # Pass 1: global tier-ranked selection respecting per-variant cap.
+        for row in all_candidates:
+            if len(selected) >= target:
+                break
+            variant = str(row.get("query_variant", "")).strip() or primary_variant
+            if variant_selected_counts.get(variant, 0) >= per_variant_cap:
+                continue
+            _try_add(row)
+
+        # Pass 2: relax variant cap if still below target (all caps were hit).
+        if len(selected) < target:
+            for row in all_candidates:
+                if len(selected) >= target:
                     break
-                if bool(row.get("quality_blocked", False)):
-                    continue
-                _spill_tier = str(row.get("source_tier", "tier3")).strip().lower()
-                if _spill_tier == "tier3" and len(str(row.get("snippet", "")).strip()) < 35:
-                    continue
-                url_value = self._normalize_url(str(row.get("url", "")).strip())
-                if not url_value or url_value in selected_urls:
-                    continue
-                variant = str(row.get("query_variant", "")).strip() or primary_variant
-                selected_urls.add(url_value)
-                selected.append(
-                    {
-                        "title": str(row.get("title", "")).strip() or url_value,
-                        "url": url_value,
-                        "snippet": str(row.get("snippet", "")).strip(),
-                        "query_variant": variant,
-                    }
-                )
+                _try_add(row)
 
         if not selected:
-            # Never return empty when seeds existed.
             selected = self._merge_results([], seeds, min(len(seeds), max(1, primary_quota)))
+
+        # Rebuild per-variant stats for the run report.
+        selected_by_variant: list[dict[str, Any]] = []
+        for v in ordered_variants:
+            entry: dict[str, Any] = {
+                "variant": v,
+                "selected": variant_selected_counts.get(v, 0),
+                "available": len(by_variant.get(v, [])),
+            }
+            if v == primary_variant:
+                entry["quota"] = per_variant_cap
+            else:
+                entry["quota_min"] = extra_quota_min
+                entry["quota_max"] = per_variant_cap
+            selected_by_variant.append(entry)
 
         stats["selected_by_variant"] = selected_by_variant
         stats["seed_count_after"] = len(selected)
@@ -4134,6 +4126,14 @@ class WebResearchEngine:
             score = min(1.0, score + 0.1)
         return round(score, 3)
 
+    def _content_query_hits(self, text: str, query_terms: set[str]) -> int:
+        """Count how many query terms appear in crawled page text."""
+        if not query_terms or not text:
+            return 0
+        tokens = set(re.split(r"[^a-z0-9]+", text.lower()))
+        tokens.discard("")
+        return len(query_terms & tokens)
+
     def _crawl_sources(
         self,
         seeds: list[dict[str, str]],
@@ -4148,12 +4148,11 @@ class WebResearchEngine:
         links_per_page = int(settings.get("crawl_links_per_page", 8))
         text_chars = int(settings.get("crawl_text_chars", 800))
         same_domain_only = bool(settings.get("crawl_same_domain_only", True))
-        relevance_gating = bool(settings.get("crawl_relevance_gating_enabled", False))
-        relevance_min_score = float(settings.get("crawl_relevance_min_score", 0.1))
-        query_terms = self._query_terms(query) if relevance_gating else set()
+        relevance_gating = bool(settings.get("crawl_relevance_gating_enabled", True))
+        relevance_min_score = float(settings.get("crawl_relevance_min_score", 0.25))
+        deep_follow_limit = int(settings.get("crawl_deep_follow_seeds", 3))
+        query_terms = self._query_terms(query) if (relevance_gating or deep_follow_limit > 0) else set()
 
-        queue: deque[tuple[str, int, str]] = deque()
-        enqueued: set[str] = set()
         visited: set[str] = {
             self._normalize_url(str(url).strip())
             for url in (exclude_urls or set())
@@ -4163,34 +4162,13 @@ class WebResearchEngine:
         failures: list[dict[str, Any]] = []
         gated_links: int = 0
 
-        for row in seeds:
-            seed_url = self._normalize_url(str(row.get("url", "")).strip())
-            if not seed_url:
-                continue
-            host = self._hostname(seed_url)
-            if not host:
-                continue
-            if seed_url in enqueued:
-                continue
-            queue.append((seed_url, 0, host))
-            enqueued.add(seed_url)
-
-        while queue and len(pages) < max_pages:
-            current_url, depth, root_host = queue.popleft()
-            if current_url in visited:
-                continue
-            visited.add(current_url)
-            if not self._can_crawl_url(current_url):
-                continue
+        def _fetch_one(url: str, depth: int, root_host: str) -> dict[str, Any] | None:
+            if not self._can_crawl_url(url):
+                return None
             try:
-                page = self._fetch_page(
-                    url=current_url,
-                    settings=settings,
-                    text_chars=text_chars,
-                )
+                page = self._fetch_page(url=url, settings=settings, text_chars=text_chars)
                 page["depth"] = depth
                 page["root_host"] = root_host
-                # Embedding-based paragraph filtering: keep only content relevant to the query
                 if bool(settings.get("embedding_content_filter_enabled", True)) and query and page.get("snippet"):
                     try:
                         filtered = self._embedding_filter_content(query, str(page["snippet"]))
@@ -4198,44 +4176,78 @@ class WebResearchEngine:
                             page["snippet"] = filtered
                     except Exception:
                         pass
-                pages.append(page)
-                # Fire per-source callback so the UI can show live discovery bubbles
                 if callable(on_source_crawled):
                     try:
                         on_source_crawled({
-                            "url": current_url,
-                            "domain": self._hostname(current_url),
+                            "url": url,
+                            "domain": self._hostname(url),
                             "title": str(page.get("title", "")).strip(),
                             "depth": depth,
                         })
                     except Exception:
                         pass
+                return page
             except Exception as exc:
-                failures.append({"url": current_url, "depth": depth, "error": str(exc)})
-                continue
+                failures.append({"url": url, "depth": depth, "error": str(exc)})
+                return None
 
-            if depth >= depth_limit:
-                continue
+        # ── Phase 1: fetch all seed pages (d=0) ───────────────────────────────
+        enqueued: set[str] = set()
+        d0_pages: list[dict[str, Any]] = []
 
-            child_count = 0
-            for href in page.get("links", []):
-                if child_count >= links_per_page or len(enqueued) >= (max_pages * (links_per_page + 1)):
+        for row in seeds:
+            seed_url = self._normalize_url(str(row.get("url", "")).strip())
+            if not seed_url or seed_url in enqueued or seed_url in visited:
+                continue
+            host = self._hostname(seed_url)
+            if not host:
+                continue
+            enqueued.add(seed_url)
+            visited.add(seed_url)
+            if len(pages) >= max_pages:
+                break
+            page = _fetch_one(seed_url, 0, host)
+            if page is not None:
+                pages.append(page)
+                d0_pages.append(page)
+
+        # ── Phase 2: d=1 expansion for the top-N seeds by content relevance ───
+        # Skip if no depth expansion requested or disabled.
+        if depth_limit > 0 and deep_follow_limit > 0 and d0_pages:
+            scored = sorted(
+                d0_pages,
+                key=lambda p: self._content_query_hits(str(p.get("snippet", "")), query_terms),
+                reverse=True,
+            )
+            follow_seeds = scored[:deep_follow_limit]
+
+            for seed_page in follow_seeds:
+                if len(pages) >= max_pages:
                     break
-                next_url = self._normalize_url(str(href), base_url=current_url)
-                if not next_url or next_url in enqueued or next_url in visited:
-                    continue
-                if not self._can_crawl_url(next_url):
-                    continue
-                if same_domain_only and self._hostname(next_url) != root_host:
-                    continue
-                if relevance_gating:
-                    rel_score = self._link_relevance_score(next_url, query_terms)
-                    if rel_score < relevance_min_score:
-                        gated_links += 1
+                root_host = str(seed_page.get("root_host", ""))
+                seed_url = str(seed_page.get("url", ""))
+                child_count = 0
+                for href in seed_page.get("links", []):
+                    if child_count >= links_per_page or len(pages) >= max_pages:
+                        break
+                    next_url = self._normalize_url(str(href), base_url=seed_url)
+                    if not next_url or next_url in enqueued or next_url in visited:
                         continue
-                queue.append((next_url, depth + 1, root_host))
-                enqueued.add(next_url)
-                child_count += 1
+                    if not self._can_crawl_url(next_url):
+                        continue
+                    if same_domain_only and self._hostname(next_url) != root_host:
+                        continue
+                    if relevance_gating:
+                        rel_score = self._link_relevance_score(next_url, query_terms)
+                        if rel_score < relevance_min_score:
+                            gated_links += 1
+                            continue
+                    enqueued.add(next_url)
+                    visited.add(next_url)
+                    page = _fetch_one(next_url, 1, root_host)
+                    if page is not None:
+                        pages.append(page)
+                    child_count += 1
 
         return pages, failures, gated_links
 

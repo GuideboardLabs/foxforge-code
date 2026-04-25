@@ -23,7 +23,7 @@ PERSONAS: list[dict[str, str]] = [
     {
         "id": "proj_mgr",
         "label": "Project Manager",
-        "query_lens": "delivery patterns, team structure, maturity markers, governance and scope",
+        "query_lens": "adoption risk, implementation complexity, timeline patterns, real-world delivery signals",
     },
     {
         "id": "tech_lead",
@@ -154,6 +154,8 @@ def generate_persona_queries(
         "1) One query per persona id.\n"
         "2) Each query must be materially different from the others.\n"
         "3) Keep each query under 16 words and focused on that persona lens.\n"
+        "4) Queries must discover information ABOUT the topic — not generate plans, deliverables, or process outputs.\n"
+        "5) The research topic must be the subject of the query, not a modifier for a process term.\n"
     )
 
     try:
