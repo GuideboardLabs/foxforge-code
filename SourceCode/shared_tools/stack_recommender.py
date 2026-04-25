@@ -69,23 +69,55 @@ def _detect_from_package_json(payload: dict[str, Any]) -> dict[str, str]:
     return stack
 
 
+_HEADLESS_TOKENS = (
+    "cli", "terminal", "command-line", "commandline", "script",
+    "tool", "daemon", "service", "bot", "agent", "library", "package",
+    "simple", "minimal",
+)
+
+_FRONTEND_TOKENS: dict[str, str] = {
+    "vue": "vue",
+    "react": "react",
+    "svelte": "svelte",
+    "htmx": "htmx",
+    "angular": "angular",
+}
+
+
+def _pick_frontend(text: str, default: str = "htmx") -> str:
+    for token, frontend in _FRONTEND_TOKENS.items():
+        if token in text:
+            return frontend
+    return default
+
+
 def recommend_greenfield(description: str) -> dict[str, Any]:
     text = str(description or "").lower()
     stack = _default_stack()
     rationale = "Defaulting to a simple Python web stack."
 
+    headless = any(t in text for t in _HEADLESS_TOKENS)
+
     if any(token in text for token in ("desktop", "avalonia", ".net", "dotnet")):
         stack = {"backend": "avalonia", "frontend": "none", "database": "none", "language": "dotnet"}
         rationale = "Desktop signals detected; selected .NET + Avalonia."
     elif any(token in text for token in ("node", "typescript", "javascript", "express", "hono", "next")):
-        stack = {"backend": "hono", "frontend": "svelte", "database": "sqlite", "language": "node"}
+        frontend = "none" if headless else _pick_frontend(text, default="svelte")
+        stack = {"backend": "hono", "frontend": frontend, "database": "sqlite", "language": "node"}
         rationale = "Node/JS signals detected; selected modern Node stack."
     elif "django" in text:
-        stack = {"backend": "django", "frontend": "none", "database": "postgres", "language": "python"}
+        frontend = "none" if headless else _pick_frontend(text, default="htmx")
+        stack = {"backend": "django", "frontend": frontend, "database": "postgres", "language": "python"}
         rationale = "Django requested explicitly."
     elif "flask" in text:
-        stack = {"backend": "flask", "frontend": "htmx", "database": "sqlite", "language": "python"}
+        frontend = "none" if headless else _pick_frontend(text, default="htmx")
+        stack = {"backend": "flask", "frontend": frontend, "database": "sqlite", "language": "python"}
         rationale = "Flask requested explicitly."
+    else:
+        frontend = "none" if headless else _pick_frontend(text, default="htmx")
+        stack["frontend"] = frontend
+        if not headless:
+            rationale = "Defaulting to Python web stack with frontend."
 
     return {
         "recommended": stack,

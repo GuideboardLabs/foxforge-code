@@ -192,6 +192,44 @@ def _prior_open_questions_block(prior_open_questions: list[str] | None) -> str:
     )
 
 
+def _confidence_rank(label: str) -> int:
+    low = str(label or "").strip().lower()
+    if low in {"high"}:
+        return 3
+    if low in {"mixed", "moderate", "med", "medium"}:
+        return 2
+    if low in {"low"}:
+        return 1
+    return 0
+
+
+def _cap_confidence_line(summary: str, cap_label: str) -> str:
+    body = str(summary or "").strip()
+    cap = "Low" if str(cap_label or "").strip().lower() == "low" else "Mixed"
+    pattern = re.compile(r"(Evidence Confidence:\s*)(High|Mixed|Moderate|Low)\b", re.IGNORECASE)
+    match = pattern.search(body)
+    if not match:
+        return body
+    current = str(match.group(2) or "").strip()
+    if _confidence_rank(current) <= _confidence_rank(cap):
+        return body
+    return pattern.sub(rf"\1{cap}", body, count=1)
+
+
+def _inject_source_quality_warning(summary: str, warning_line: str) -> str:
+    body = str(summary or "").strip()
+    warning = str(warning_line or "").strip()
+    if not body or not warning:
+        return body
+    if "## Source Quality Warning" in body:
+        return body
+    block = f"## Source Quality Warning\n- {warning}\n"
+    anchor = re.search(r"^##\s*Executive Summary\b", body, flags=re.IGNORECASE | re.MULTILINE)
+    if not anchor:
+        return f"{block}\n{body}".strip()
+    return f"{body[:anchor.start()].rstrip()}\n\n{block}\n{body[anchor.start():].lstrip()}".strip()
+
+
 def synthesize(
     question: str,
     findings: list[dict],
@@ -227,7 +265,7 @@ def synthesize(
             return "MED"
         return "LOW"
 
-    tiers = {"tier1", "tier2", "tier3"}
+    tiers = {"tier1", "tier2", "tier3", "tier4"}
     normalized_tier_map = {
         str(k or "").strip().rstrip("/,."): str(v or "").strip().lower()
         for k, v in (source_tier_map or {}).items()
@@ -235,7 +273,7 @@ def synthesize(
     }
 
     def _tier_breakdown_for_finding(text: str) -> dict[str, int]:
-        counts = {"tier1": 0, "tier2": 0, "tier3": 0}
+        counts = {"tier1": 0, "tier2": 0, "tier3": 0, "tier4": 0}
         for raw in _SOURCE_MARKER_URL_RE.findall(str(text or "")):
             url = _clean_url(raw) or str(raw or "").strip().rstrip("/,.")
             if not url:
@@ -257,6 +295,7 @@ def synthesize(
                 "tier1": int(raw_counts.get("tier1", 0) or 0),
                 "tier2": int(raw_counts.get("tier2", 0) or 0),
                 "tier3": int(raw_counts.get("tier3", 0) or 0),
+                "tier4": int(raw_counts.get("tier4", 0) or 0),
             }
         else:
             tier_counts = _tier_breakdown_for_finding(str(item.get("finding", "")))
@@ -284,6 +323,49 @@ def synthesize(
             "use only to add caveats, flag compliance notes, or note statistical uncertainty):\n\n"
             f"{advisory_blob}"
         )
+
+    tier_totals = {"tier1": 0, "tier2": 0, "tier3": 0, "tier4": 0}
+    for item in findings:
+        raw_counts = item.get("source_tier_counts")
+        if isinstance(raw_counts, dict):
+            counts = {
+                "tier1": int(raw_counts.get("tier1", 0) or 0),
+                "tier2": int(raw_counts.get("tier2", 0) or 0),
+                "tier3": int(raw_counts.get("tier3", 0) or 0),
+                "tier4": int(raw_counts.get("tier4", 0) or 0),
+            }
+        else:
+            counts = _tier_breakdown_for_finding(str(item.get("finding", "")))
+        for key in tier_totals:
+            tier_totals[key] += int(counts.get(key, 0) or 0)
+    total_citations = sum(tier_totals.values())
+    tier_cap_label = ""
+    source_quality_warning = ""
+    if total_citations > 0:
+        tier12 = int(tier_totals.get("tier1", 0) or 0) + int(tier_totals.get("tier2", 0) or 0)
+        tier3 = int(tier_totals.get("tier3", 0) or 0)
+        tier4 = int(tier_totals.get("tier4", 0) or 0)
+        if tier4 > 0 and (tier4 / max(1, total_citations)) >= 0.6:
+            tier_cap_label = "low"
+            source_quality_warning = (
+                "Most cited support is cross-domain analogy (tier4). "
+                "Conclusions are exploratory — no official docs, registries, or technical sources confirmed these claims."
+            )
+        elif tier12 == 0 and (tier3 + tier4) > 0:
+            tier_cap_label = "mixed"
+            source_quality_warning = (
+                "All cited support is community/blog/forum level (tier3/tier4). "
+                "Confidence is capped — no official documentation or established technical sources corroborate these findings."
+            )
+
+    def _postprocess_output(text: str) -> str:
+        out = _sanitize_markdown_urls(_ensure_inline_source_links(text, findings))
+        if tier_cap_label:
+            out = _cap_confidence_line(out, tier_cap_label)
+        if source_quality_warning:
+            out = _inject_source_quality_warning(out, source_quality_warning)
+        return out
+
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     system_prompt = (
         f"Today's date: {today_str}. "
@@ -305,10 +387,17 @@ def synthesize(
         "(self-assessed by the agent on a 1-5 scale). Weight your conclusions toward HIGH-confidence "
         "findings. If your summary relies heavily on MED or LOW findings, explicitly flag this "
         "in the Evidence Confidence line.\n\n"
-        "SOURCE TIER WEIGHTING: Agent findings may include source tier markers in the label "
-        "(tier1, tier2, tier3). Treat tier1 support as stronger than tier3 support. If a claim "
-        "has only tier3 backing, hedge with language like 'one commentary source suggests' rather "
-        "than 'research shows'. Tier1 and tier3 are not equal-weight evidence.\n\n"
+        "SOURCE TIER WEIGHTING: Agent findings include source tier markers in the label. "
+        "Tier1 = official primary sources (language docs, package registries, standards bodies, "
+        "security advisories, platform documentation). "
+        "Tier2 = strong secondary sources (maintained repos, Stack Overflow, engineering blogs, "
+        "reputable technical publishers, official vendor community forums). "
+        "Tier3 = usable but variable sources (community discussion, tutorial sites, dev blogs, "
+        "Medium posts, Reddit threads). "
+        "Tier4 = cross-domain analogy sources — inspiration only, cannot justify [E] claims. "
+        "Treat tier1 claims as authoritative; tier2 as reliable with normal caveats; "
+        "tier3 as context only — hedge with 'community experience suggests' rather than 'research shows'; "
+        "tier4 must never appear as evidence.\n\n"
         "EVIDENCE DISCIPLINE: Agent findings include [E]/[I]/[S] labels.\n"
         "- [E]: state confidently, include an inline markdown URL citation like [source](https://...).\n"
         "- [I]: frame as inference — 'this suggests...'\n"
@@ -332,6 +421,8 @@ def synthesize(
         "A gap declaration is better than a gap filled with unverified claims.\n\n"
         "SOURCE INTEGRITY: Cite only external sources from this run's agent findings. "
         "Prior internal artifacts (research raws, summaries, critiques, project notes) are not sources.\n\n"
+        "FINAL SUMMARY CONTRACT: Include explicit sections for Executive Summary, Key Findings, "
+        "Uncertainties & Risks, Next Steps, and ensure the narrative is project-specific rather than generic.\n\n"
         "End Executive Summary with: 'Evidence Confidence: [High/Mixed/Low] — [one-line reason].' "
         "For time-sensitive topics, state whether events are upcoming, ongoing, or past relative to today."
     )
@@ -421,7 +512,7 @@ def synthesize(
                 if _looks_truncated_output(candidate):
                     LOGGER.warning("Synthesis output appears truncated; retrying once with truncation guard.")
                     continue
-                return _sanitize_markdown_urls(_ensure_inline_source_links(candidate, findings))
+                return _postprocess_output(candidate)
         except Exception as exc:
             err = f"cycle {cycle + 1}/{validation_cycles}: {type(exc).__name__}: {str(exc).strip()[:320]}"
             generation_errors.append(err)
@@ -448,7 +539,7 @@ def synthesize(
                 retry_backoff_sec=retry_backoff_sec,
             )
             if _is_valid_synthesis(recovered):
-                return _sanitize_markdown_urls(_ensure_inline_source_links(recovered, findings))
+                return _postprocess_output(recovered)
         except Exception as exc:
             err = f"truncation_recovery: {type(exc).__name__}: {str(exc).strip()[:320]}"
             generation_errors.append(err)
@@ -456,15 +547,12 @@ def synthesize(
             pass
 
     if _is_valid_synthesis(last_text):
-        return _sanitize_markdown_urls(_ensure_inline_source_links(last_text, findings))
+        return _postprocess_output(last_text)
     if last_text.strip():
-        return _sanitize_markdown_urls(
-            _ensure_inline_source_links(
-                f"{last_text}\n\n"
-                "_Reliability note: synthesis did not pass full section validation after retries; "
-                "review before treating as final._",
-                findings,
-            )
+        return _postprocess_output(
+            f"{last_text}\n\n"
+            "_Reliability note: synthesis did not pass full section validation after retries; "
+            "review before treating as final._"
         )
     reason = generation_errors[-1] if generation_errors else "unknown error"
     raise SynthesisUnavailableError(
@@ -641,7 +729,10 @@ def run_skeptic_pass_with_severity(
         "the link — verify against the raw findings before demoting.\n"
         "- Only demote [E] -> [I] when NO supporting URL exists anywhere in raw findings.\n"
         "- Preserve valid inline markdown links for supported [E] claims whenever possible.\n"
-        "- Keep required sections and preserve readability.\n\n"
+        "- Keep required sections and preserve readability.\n"
+        "- Validate final contract sections: Executive Summary, Evidence/Inference/Speculation buckets, "
+        "Project Implications, Recommended Actions, Risks, Source Quality Notes, Rejected/Weak Sources. "
+        "If any are missing, add them succinctly.\n\n"
         "- Fabricated-authority guardrail: if a claim leans on a famous authority/framework "
         "(for example Taylor, Miller's Law, Hawthorne effect, Fogg model) via a secondary blog/post "
         "and the cited source does not actually support the specific claim, demote [E] -> [I] or strike it.\n"

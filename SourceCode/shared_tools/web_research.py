@@ -305,6 +305,7 @@ def build_web_progress_payload(result: dict[str, Any] | None) -> dict[str, Any]:
         "tier1": int(tier_counts.get("tier1", 0) or 0),
         "tier2": int(tier_counts.get("tier2", 0) or 0),
         "tier3": int(tier_counts.get("tier3", 0) or 0),
+        "banned_sources": int(tier_counts.get("banned_sources", 0) or 0),
         "web_sources": used_sources,
     }
 
@@ -312,43 +313,726 @@ def build_web_progress_payload(result: dict[str, Any] | None) -> dict[str, Any]:
 class WebResearchEngine:
     VALID_MODES = {"off", "ask", "auto"}
     VALID_PROVIDERS = {"auto", "searxng", "duckduckgo_html", "duckduckgo_api"}
+    # General developer-focused source tiers.
+    # Tier 1: official/primary sources for coding and development: language docs,
+    # standards bodies, package registries, platform docs, release/security sources,
+    # and project-owned documentation. These should dominate for implementation
+    # details, compatibility, API behavior, vulnerability status, and setup steps.
     TRUST_TIER_1 = {
-        "reuters.com",
-        "apnews.com",
-        "bbc.com",
-        "nytimes.com",
-        "wsj.com",
-        "economist.com",
-        "ft.com",
-        "espn.com",
-        "nasa.gov",
-        "noaa.gov",
-        "cdc.gov",
-        "nih.gov",
-        "who.int",
-        "sec.gov",
-        "federalreserve.gov",
-        "wikipedia.org",
+        # Standards, specifications, and interoperability references.
+        "w3.org",
+        "whatwg.org",
+        "tc39.es",
+        "ecma-international.org",
+        "ietf.org",
+        "rfc-editor.org",
+        "iana.org",
+        "unicode.org",
+        "opengroup.org",
+        "openapis.org",
+        "json-schema.org",
+        "semver.org",
+        "spdx.org",
+        "cyclonedx.org",
+        "slsa.dev",
+        "sigstore.dev",
+        "opencontainers.org",
+        "cncf.io",
+        "linuxfoundation.org",
+
+        # Security, vulnerability, and supply-chain primary sources.
+        "cisa.gov",
+        "nist.gov",
+        "nvd.nist.gov",
+        "cve.org",
+        "mitre.org",
+        "owasp.org",
+        "osv.dev",
+        "deps.dev",
+        "rustsec.org",
+        "first.org",
+        "cert.org",
+        "cert.europa.eu",
+        "advisories.gitlab.com",
+        "security.snyk.io",
+        "portswigger.net",
+
+        # Source-control and developer platform documentation.
+        "docs.github.com",
+        "docs.gitlab.com",
+        "developer.atlassian.com",
+        "support.atlassian.com",
+        "git-scm.com",
+        "gitforwindows.org",
+        "mercurial-scm.org",
+        "subversion.apache.org",
+
+        # Language, runtime, and standard-library documentation.
+        "developer.mozilla.org",
+        "docs.python.org",
+        "python.org",
+        "peps.python.org",
+        "nodejs.org",
+        "deno.com",
+        "bun.sh",
+        "typescriptlang.org",
+        "go.dev",
+        "pkg.go.dev",
+        "rust-lang.org",
+        "doc.rust-lang.org",
+        "rustup.rs",
+        "ruby-lang.org",
+        "ruby-doc.org",
+        "php.net",
+        "perl.org",
+        "perldoc.perl.org",
+        "docs.oracle.com",
+        "openjdk.org",
+        "kotlinlang.org",
+        "scala-lang.org",
+        "docs.swift.org",
+        "swift.org",
+        "dart.dev",
+        "elixir-lang.org",
+        "hexdocs.pm",
+        "erlang.org",
+        "haskell.org",
+        "clojure.org",
+        "racket-lang.org",
+        "lua.org",
+        "gnu.org",
+        "gcc.gnu.org",
+        "llvm.org",
+        "clang.llvm.org",
+        "ziglang.org",
+        "nim-lang.org",
+        "julia-lang.org",
+        "r-project.org",
+        "cran.r-project.org",
+
+        # Official package registries and package manager docs.
+        "pypi.org",
+        "npmjs.com",
+        "docs.npmjs.com",
+        "crates.io",
+        "docs.rs",
+        "rubygems.org",
+        "packagist.org",
+        "getcomposer.org",
+        "nuget.org",
+        "search.maven.org",
+        "central.sonatype.com",
+        "repo.maven.apache.org",
+        "maven.apache.org",
+        "gradle.org",
+        "plugins.gradle.org",
+        "pub.dev",
+        "hex.pm",
+        "clojars.org",
+        "conda.io",
+        "anaconda.org",
+        "brew.sh",
+        "vcpkg.io",
+        "conan.io",
+        "packages.debian.org",
+        "packages.ubuntu.com",
+        "archlinux.org",
+        "alpinelinux.org",
+        "fedoraproject.org",
+        "chocolatey.org",
+        "scoop.sh",
+
+        # Web, frontend, testing, and JavaScript ecosystem docs.
+        "web.dev",
+        "developer.chrome.com",
+        "webkit.org",
+        "react.dev",
+        "nextjs.org",
+        "vuejs.org",
+        "angular.dev",
+        "angular.io",
+        "svelte.dev",
+        "kit.svelte.dev",
+        "solidjs.com",
+        "preactjs.com",
+        "astro.build",
+        "nuxt.com",
+        "remix.run",
+        "emberjs.com",
+        "jquery.com",
+        "vitejs.dev",
+        "vitest.dev",
+        "webpack.js.org",
+        "rollupjs.org",
+        "parceljs.org",
+        "babeljs.io",
+        "eslint.org",
+        "prettier.io",
+        "pnpm.io",
+        "yarnpkg.com",
+        "jestjs.io",
+        "playwright.dev",
+        "cypress.io",
+        "testing-library.com",
+        "storybook.js.org",
+        "tailwindcss.com",
+        "getbootstrap.com",
+        "mui.com",
+        "chakra-ui.com",
+        "sass-lang.com",
+        "postcss.org",
+        "docusaurus.io",
+        "vitepress.dev",
+
+        # Python data, backend, and application framework docs.
+        "django-project.com",
+        "flask.palletsprojects.com",
+        "palletsprojects.com",
+        "fastapi.tiangolo.com",
+        "pydantic.dev",
+        "sqlalchemy.org",
+        "alembic.sqlalchemy.org",
+        "numpy.org",
+        "pandas.pydata.org",
+        "scipy.org",
+        "scikit-learn.org",
+        "matplotlib.org",
+        "seaborn.pydata.org",
+        "plotly.com",
+        "bokeh.org",
+        "streamlit.io",
+        "docs.pytest.org",
+        "pytest.org",
+        "sphinx-doc.org",
+        "mkdocs.org",
+        "jupyter.org",
+        "ipython.org",
+        "celeryq.dev",
+        "scrapy.org",
+
+        # Java, JVM, .NET, mobile, and application platform docs.
+        "spring.io",
+        "quarkus.io",
+        "micronaut.io",
+        "jakarta.ee",
+        "hibernate.org",
+        "junit.org",
+        "jetbrains.com",
+        "learn.microsoft.com",
+        "docs.microsoft.com",
+        "dotnet.microsoft.com",
+        "developer.android.com",
+        "firebase.google.com",
+        "developer.apple.com",
+        "docs.flutter.dev",
+        "flutter.dev",
+        "reactnative.dev",
+        "expo.dev",
+
+        # Cloud, infrastructure, orchestration, and observability docs.
+        "docs.aws.amazon.com",
+        "aws.amazon.com",
+        "cloud.google.com",
+        "developers.google.com",
+        "ai.google.dev",
+        "cloudflare.com",
+        "developers.cloudflare.com",
+        "azure.microsoft.com",
+        "ibm.com",
+        "docs.oracle.com",
+        "docs.digitalocean.com",
+        "kubernetes.io",
+        "helm.sh",
+        "docker.com",
+        "docs.docker.com",
+        "podman.io",
+        "containerd.io",
+        "terraform.io",
+        "developer.hashicorp.com",
+        "ansible.com",
+        "docs.ansible.com",
+        "pulumi.com",
+        "prometheus.io",
+        "grafana.com",
+        "opentelemetry.io",
+        "nginx.org",
+        "envoyproxy.io",
+        "istio.io",
+        "linkerd.io",
+        "consul.io",
+        "nomadproject.io",
+
+        # Databases, search, queues, and data infrastructure docs.
+        "postgresql.org",
+        "sqlite.org",
+        "mysql.com",
+        "dev.mysql.com",
+        "mariadb.com",
+        "redis.io",
+        "mongodb.com",
+        "elastic.co",
+        "opensearch.org",
+        "clickhouse.com",
+        "duckdb.org",
+        "cassandra.apache.org",
+        "couchbase.com",
+        "neo4j.com",
+        "influxdata.com",
+        "cockroachlabs.com",
+        "supabase.com",
+        "planetscale.com",
+        "prisma.io",
+        "graphql.org",
+        "grpc.io",
+        "protobuf.dev",
+        "rabbitmq.com",
+        "kafka.apache.org",
+
+        # ML, AI, data-science, and numerical-computing docs.
+        "pytorch.org",
+        "tensorflow.org",
+        "keras.io",
+        "jax.readthedocs.io",
+        "huggingface.co",
+        "docs.openai.com",
+        "platform.openai.com",
+        "docs.anthropic.com",
+        "anthropic.com",
+        "onnx.ai",
+        "mlflow.org",
+        "xgboost.readthedocs.io",
+        "lightgbm.readthedocs.io",
+        "catboost.ai",
+        "ray.io",
+        "dask.org",
+        "numba.pydata.org",
+
+        # Operating-system, manuals, and foundational project docs.
+        "kernel.org",
+        "docs.kernel.org",
+        "man7.org",
+        "freebsd.org",
+        "debian.org",
+        "ubuntu.com",
+        "wiki.archlinux.org",
+        "gentoo.org",
+        "opensuse.org",
+        "systemd.io",
+        "freedesktop.org",
+        "x.org",
+        "wayland.freedesktop.org",
+        "apache.org",
+        "eclipse.org",
+        "mozilla.org",
     }
+
+    # Tier 2: strong secondary sources for developer work: maintained repos,
+    # Q&A communities, reputable technical publishers, vendor engineering blogs,
+    # and high-quality tutorials. Useful for examples, edge cases, and tradeoffs,
+    # but they should not outrank primary docs for exact API behavior.
     TRUST_TIER_2 = {
-        "forbes.com",
-        "bloomberg.com",
-        "cnbc.com",
-        "theguardian.com",
-        "axios.com",
-        "verge.com",
-        "techcrunch.com",
-        "arstechnica.com",
+        # Source hosting, issue trackers, code review, and project hubs.
         "github.com",
+        "gitlab.com",
+        "bitbucket.org",
+        "codeberg.org",
+        "sourceforge.net",
+        "launchpad.net",
+        "savannah.gnu.org",
+        "gerrit-review.googlesource.com",
+        "go-review.googlesource.com",
+        "chromium.googlesource.com",
+        "android.googlesource.com",
+
+        # Developer Q&A and focused technical communities.
         "stackoverflow.com",
+        "stackexchange.com",
+        "serverfault.com",
+        "superuser.com",
+        "askubuntu.com",
+        "dba.stackexchange.com",
+        "security.stackexchange.com",
+        "unix.stackexchange.com",
+        "softwareengineering.stackexchange.com",
+        "codereview.stackexchange.com",
+        "math.stackexchange.com",
+        "crossvalidated.com",
+        "discuss.python.org",
+        "discuss.rubyonrails.org",
+        "users.rust-lang.org",
+        "internals.rust-lang.org",
+        "discuss.kotlinlang.org",
+        "forum.djangoproject.com",
+        "discuss.pytorch.org",
+        "discuss.tensorflow.org",
+        "forums.docker.com",
+        "discuss.kubernetes.io",
+        "discourse.llvm.org",
+
+        # Documentation hosting and API/doc aggregators.
+        "readthedocs.io",
+        "readthedocs.org",
+        "devdocs.io",
+        "pkgdown.r-lib.org",
+        "docs.readme.com",
+        "stoplight.io",
+        "redocly.com",
+        "swagger.io",
+        "postman.com",
+        "insomnia.rest",
+
+        # Reputable technical education and implementation guides.
+        "realpython.com",
+        "fullstackpython.com",
+        "testdriven.io",
+        "pythonspeed.com",
+        "python-poetry.org",
+        "realworldpython.com",
+        "baeldung.com",
+        "mkyong.com",
+        "reflectoring.io",
+        "vladmihalcea.com",
+        "callicoder.com",
+        "css-tricks.com",
+        "smashingmagazine.com",
+        "webplatform.news",
+        "2ality.com",
+        "surma.dev",
+        "overreacted.io",
+        "kentcdodds.com",
+        "joshwcomeau.com",
+        "robinwieruch.de",
+        "digitalocean.com",
+        "freecodecamp.org",
+        "learnxinyminutes.com",
+        "refactoring.guru",
+        "martinfowler.com",
+        "patterns.dev",
+        "roadmap.sh",
+        "thoughtworks.com",
+        "atlassian.com",
+        "stripe.com",
+        "twilio.com",
+        "shopify.dev",
+        "vercel.com",
+        "netlify.com",
+        "heroku.com",
+        "fly.io",
+        "render.com",
+        "railway.app",
+        "auth0.com",
+        "okta.com",
+
+        # Engineering blogs and vendor technical blogs.
+        "engineering.fb.com",
+        "netflixtechblog.com",
+        "engineering.linkedin.com",
+        "engineering.atspotify.com",
+        "dropbox.tech",
+        "blog.cloudflare.com",
+        "devblogs.microsoft.com",
+        "github.blog",
+        "about.gitlab.com",
+        "blog.rust-lang.org",
+        "v8.dev",
+        "chromium.org",
+        "engineering.salesforce.com",
+        "engineering.shopify.com",
+        "slack.engineering",
+        "eng.uber.com",
+        "uber.com",
+        "lyft.com",
+        "airbnb.io",
+        "medium.engineering",
+        "engineering.atmeta.com",
+
+        # Security research, incident analysis, and practitioner publications.
+        "krebsonsecurity.com",
+        "bleepingcomputer.com",
+        "darkreading.com",
+        "securityweek.com",
+        "threatpost.com",
+        "talosintelligence.com",
+        "unit42.paloaltonetworks.com",
+        "projectzero.google",
+        "googleprojectzero.blogspot.com",
+        "blog.trailofbits.com",
+        "trailofbits.com",
+        "blog.qualys.com",
+        "rapid7.com",
+        "veracode.com",
+        "snyk.io",
+        "socket.dev",
+        "wiz.io",
+        "semgrep.dev",
+
+        # Technical news and systems/Linux publications.
+        "lwn.net",
+        "phoronix.com",
+        "thenewstack.io",
+        "infoq.com",
+        "arstechnica.com",
+        "theregister.com",
+        "infoworld.com",
+        "zdnet.com",
+        "techtarget.com",
+        "itnext.io",
+        "towardsdatascience.com",
+        "lilianweng.github.io",
+        "sebastianraschka.com",
+        "distill.pub",
+        "paperswithcode.com",
+        "arxiv.org",
+        "semanticscholar.org",
+
+        # Practical operations, Linux, and hosting guides.
+        "redhat.com",
+        "canonical.com",
+        "linuxize.com",
+        "linuxhandbook.com",
+        "linuxjournal.com",
+        "howtoforge.com",
+        "phoenixnap.com",
+        "linode.com",
+        "akamai.com",
+        "cloudsmith.com",
+        "jfrog.com",
+        "sonatype.com",
+    }
+
+    # Tier 3: usable but variable developer sources. These are often community,
+    # SEO-heavy, beginner-oriented, paywalled, anecdotal, or weakly maintained.
+    # Keep them as fallback/context only; do not prefer them over tiers 1-2.
+    TRUST_TIER_3 = {
+        # Social/community feeds and anecdotal discussion.
         "reddit.com",
-        "x.com",
-        "twitter.com",
+        "old.reddit.com",
+        "news.ycombinator.com",
+        "lobste.rs",
+        "dev.to",
         "medium.com",
+        "hashnode.com",
         "substack.com",
         "linkedin.com",
-        "canva.com",
+        "quora.com",
+        "producthunt.com",
+        "mastodon.social",
+        "fosstodon.org",
+        "lemmy.world",
+
+        # Broad tutorial and training sites with mixed technical depth.
+        "w3schools.com",
+        "geeksforgeeks.org",
+        "tutorialspoint.com",
+        "javatpoint.com",
+        "programiz.com",
+        "guru99.com",
+        "educative.io",
+        "codecademy.com",
+        "datacamp.com",
+        "pluralsight.com",
+        "coursera.org",
+        "udemy.com",
+        "udacity.com",
+        "simplilearn.com",
+        "edureka.co",
+        "intellipaat.com",
+        "hackr.io",
+        "sololearn.com",
+        "codeacademy.com",
+        "codedamn.com",
+        "scrimba.com",
+
+        # Mixed-quality dev blogs, snippet sites, and magazine/community posts.
+        "hackernoon.com",
+        "dzone.com",
+        "sitepoint.com",
+        "codeproject.com",
+        "code-maze.com",
+        "toptal.com",
+        "bitsrc.io",
+        "blog.logrocket.com",
+        "blog.bitsrc.io",
+        "daily.dev",
+        "earthly.dev",
+        "betterprogramming.pub",
+        "plainenglish.io",
+        "towardsdev.com",
+        "analyticsvidhya.com",
+        "neptune.ai",
+        "machinelearningmastery.com",
+        "kdnuggets.com",
+        "paperspace.com",
+        "assemblyai.com",
+        "openreplay.com",
+
+        # Admin, hosting, and Linux how-to content that can be useful but varies.
+        "linuxhint.com",
+        "tecmint.com",
+        "itsfoss.com",
+        "ostechnix.com",
+        "tecadmin.net",
+        "serverlab.ca",
+        "hostinger.com",
+        "kinsta.com",
+        "wpbeginner.com",
+        "ionos.com",
+        "cloudways.com",
+        "namecheap.com",
+        "godaddy.com",
+        "bluehost.com",
+
+        # Secondary mirrors, examples, and reference aggregators.
+        "mankier.com",
+        "linux.die.net",
+        "ss64.com",
+        "commandlinux.com",
+        "explainshell.com",
+        "devhints.io",
+        "cheatography.com",
+        "cheatsheetseries.owasp.org",
+        "quickref.me",
+        "runebook.dev",
+        "devdoc.net",
+        "docs4dev.com",
+        "rosettacode.org",
+        "example-code.com",
+        "zetcode.com",
+        "w3resource.com",
+        "includehelp.com",
     }
+
+    # Banned sources: domains that are usually poor inputs for code/development
+    # web-crawl context. They are blocked by scoring (quality_blocked=True) rather
+    # than merely demoted, because they are commonly social shells, shorteners,
+    # scraped copies, spam, paste dumps, job/review marketplaces, or CDN/file hosts
+    # with little explanatory content.
+    BANNED_SOURCES = {
+        # Social/media shells and video/image pages with low crawl text signal.
+        "facebook.com",
+        "m.facebook.com",
+        "instagram.com",
+        "tiktok.com",
+        "threads.net",
+        "snapchat.com",
+        "pinterest.com",
+        "x.com",
+        "twitter.com",
+        "t.co",
+        "youtube.com",
+        "youtu.be",
+        "vimeo.com",
+        "dailymotion.com",
+        "twitch.tv",
+        "imgur.com",
+        "flickr.com",
+        "giphy.com",
+        "tumblr.com",
+        "vk.com",
+        "weibo.com",
+
+        # URL shorteners and tracking redirectors.
+        "bit.ly",
+        "tinyurl.com",
+        "goo.gl",
+        "ow.ly",
+        "buff.ly",
+        "rebrand.ly",
+        "cutt.ly",
+        "is.gd",
+        "s.id",
+        "lnkd.in",
+        "ift.tt",
+        "trib.al",
+        "tiny.cc",
+        "shorturl.at",
+        "rb.gy",
+
+        # Paste dumps, raw snippets, and anonymous file-drop pages.
+        "pastebin.com",
+        "hastebin.com",
+        "paste.rs",
+        "ghostbin.co",
+        "rentry.co",
+        "justpaste.it",
+        "controlc.com",
+        "codepad.org",
+        "ideone.com",
+        "replit.com",
+        "codesandbox.io",
+        "jsfiddle.net",
+        "codepen.io",
+
+        # Stack Overflow/Q&A scraper or answer-farm copies.
+        "codegrepper.com",
+        "devasking.com",
+        "stackoom.com",
+        "copyprogramming.com",
+        "programmersought.com",
+        "newbedev.com",
+        "pythonfixing.com",
+        "errorsfixing.com",
+        "anycodings.com",
+        "syntaxfix.com",
+        "tutorialguruji.com",
+        "stackovercoder.com",
+        "stackoverrun.com",
+        "qastack.com",
+        "qastack.jp",
+        "qastack.cn",
+        "qastack.mx",
+        "qastack.id",
+        "qastack.kr",
+        "itecnote.com",
+        "iditect.com",
+        "helpex.vn",
+        "issueantenna.com",
+        "bleepcoder.com",
+        "gitmemory.com",
+        "lightrun.com",
+
+        # CDN/file mirrors and generated package file hosts without explanation.
+        "unpkg.com",
+        "cdn.jsdelivr.net",
+        "cdnjs.cloudflare.com",
+        "rawgit.com",
+        "raw.githack.com",
+        "raw.githubusercontent.com",
+        "gist.githubusercontent.com",
+        "gitcdn.xyz",
+        "bundlephobia.com",
+
+        # Marketplaces, company-review sites, and mostly non-technical listings.
+        "g2.com",
+        "capterra.com",
+        "trustpilot.com",
+        "glassdoor.com",
+        "indeed.com",
+        "monster.com",
+        "ziprecruiter.com",
+        "upwork.com",
+        "fiverr.com",
+        "freelancer.com",
+        "peopleperhour.com",
+        "appsumo.com",
+        "alternativeto.net",
+        "slant.co",
+        "saashub.com",
+
+        # Generic document/social sharing and consumer wiki/how-to pages.
+        "scribd.com",
+        "slideshare.net",
+        "academia.edu",
+        "researchgate.net",
+        "prezi.com",
+        "issuu.com",
+        "wikihow.com",
+        "ehow.com",
+        "answers.com",
+        "answers.microsoft.com",
+        "support.google.com",
+    }
+
     PROPAGANDA_TERMS = {
         "shocking", "you won't believe", "exposed", "bombshell", "destroyed",
         "humiliated", "secret agenda", "mainstream media won't", "cover-up",
@@ -397,225 +1081,6 @@ class WebResearchEngine:
         "sign up",
         "create account",
     }
-
-    TRUST_TIER_1_SPORTS = {
-        "mmafighting.com",
-        "bloodyelbow.com",
-        "sherdog.com",
-        "combatpress.com",
-        "tapology.com",
-    }
-
-    TRUST_TIER_2_INDIE = {
-        "defector.com",
-        "propublica.org",
-        "theintercept.com",
-        "404media.co",
-        "therealnews.com",
-        "unherd.com",
-    }
-
-    # Academic / peer-reviewed — treat as tier1 for factual claims
-    TRUST_TIER_1_ACADEMIC = {
-        "arxiv.org",
-        "pubmed.ncbi.nlm.nih.gov",
-        "ncbi.nlm.nih.gov",
-        "nature.com",
-        "science.org",
-        "plos.org",
-        "jstor.org",
-        "scholar.google.com",
-        "semanticscholar.org",
-        "biorxiv.org",
-        "medrxiv.org",
-    }
-
-    # Legal / court records — high-trust primary sources
-    TRUST_TIER_1_LEGAL = {
-        "law.cornell.edu",
-        "oyez.org",
-        "scotusblog.com",
-        "supremecourt.gov",
-        "uscourts.gov",
-        "congress.gov",
-        "regulations.gov",
-    }
-
-    # Mainstream sports (non-MMA) — established beat coverage
-    TRUST_TIER_2_MAINSTREAM_SPORTS = {
-        "theathletic.com",
-        "bleacherreport.com",
-        "si.com",
-        "basketball-reference.com",
-        "baseball-reference.com",
-        "pro-football-reference.com",
-        "nfl.com",
-        "nba.com",
-        "mlb.com",
-        "nhl.com",
-        "skysports.com",
-        "goal.com",
-    }
-
-    # Prosumer / hobbyist tech — hands-on, independent testing
-    TRUST_TIER_2_PROSUMER_TECH = {
-        "hackaday.com",
-        "tomshardware.com",
-        "ifixit.com",
-        "rtings.com",
-        "notebookcheck.net",
-        "makezine.com",
-        "instructables.com",
-        "thingiverse.com",
-        "lttreviews.com",
-        "techpowerup.com",
-        "wirecutter.com",
-        "thewirecutter.com",
-        "consumerreports.org",
-        "reviewed.com",
-        "pcmag.com",
-    }
-
-    # Gaming / esports editorial
-    TRUST_TIER_2_GAMING = {
-        "ign.com",
-        "eurogamer.net",
-        "pcgamer.com",
-        "rockpapershotgun.com",
-        "giantbomb.com",
-        "gamespot.com",
-        "kotaku.com",
-        "polygon.com",
-        "vg247.com",
-    }
-
-    # Film / TV criticism and records
-    TRUST_TIER_2_FILM_TV = {
-        "imdb.com",
-        "rottentomatoes.com",
-        "letterboxd.com",
-        "criterion.com",
-        "rogerebert.com",
-        "avclub.com",
-    }
-
-    # Music criticism and cataloguing
-    TRUST_TIER_2_MUSIC = {
-        "pitchfork.com",
-        "allmusic.com",
-        "discogs.com",
-        "rateyourmusic.com",
-        "genius.com",
-        "stereogum.com",
-    }
-
-    # Health / clinical consumer
-    TRUST_TIER_2_HEALTH = {
-        "mayoclinic.org",
-        "clevelandclinic.org",
-        "healthline.com",
-        "webmd.com",
-        "medicalnewstoday.com",
-        "nhs.uk",
-        "hopkinsmedicine.org",
-    }
-
-    # Finance / retail investing
-    TRUST_TIER_2_FINANCE = {
-        "investopedia.com",
-        "morningstar.com",
-        "marketwatch.com",
-        "seekingalpha.com",
-        "fool.com",
-        "bankrate.com",
-    }
-    TRUST_TIER_2_BUSINESS = {
-        "hbr.org",
-        "mckinsey.com",
-        "entrepreneur.com",
-        "inc.com",
-        "fastcompany.com",
-    }
-    TRUST_TIER_2_REAL_ESTATE = {
-        "zillow.com",
-        "redfin.com",
-        "realtor.com",
-        "apartments.com",
-        "co-star.com",
-    }
-    TRUST_TIER_2_AUTOMOTIVE = {
-        "caranddriver.com",
-        "motortrend.com",
-        "edmunds.com",
-        "kbb.com",
-        "cars.com",
-    }
-    TRUST_TIER_2_ART = {
-        "artsy.net",
-        "moma.org",
-        "metmuseum.org",
-        "tate.org.uk",
-        "smithsonianmag.com",
-    }
-    TRUST_TIER_2_LEGAL = {
-        "justia.com",
-        "findlaw.com",
-        "canlii.org",
-    }
-    TRUST_TIER_2_EDUCATION = {
-        "coursera.org",
-        "edx.org",
-        "khanacademy.org",
-        "collegeboard.org",
-    }
-    TRUST_TIER_2_TRAVEL = {
-        "tripadvisor.com",
-        "lonelyplanet.com",
-        "rome2rio.com",
-        "seatguru.com",
-    }
-    TRUST_TIER_2_FOOD = {
-        "allrecipes.com",
-        "seriouseats.com",
-        "nutritionix.com",
-        "eatright.org",
-    }
-    TRUST_TIER_2_BOOKS = {
-        "goodreads.com",
-        "publishersweekly.com",
-        "kirkusreviews.com",
-    }
-    TRUST_TIER_2_PARENTING = {
-        "healthychildren.org",
-        "zerotothree.org",
-        "parents.com",
-    }
-    TRUST_TIER_2_ANIMAL_CARE = {
-        "avma.org",
-        "aaha.org",
-        "merckvetmanual.com",
-        "vcahospitals.com",
-        "aspca.org",
-        "akc.org",
-        "petmd.com",
-    }
-    # Social / feed / forum domains that are low-signal for technical queries.
-    # Applied as a score penalty in _topic_domain_bonus when topic_type="technical".
-    TECHNICAL_SOCIAL_DEMOTE = frozenset({
-        "reddit.com",
-        "medium.com",
-        "substack.com",
-        "linkedin.com",
-        "twitter.com",
-        "x.com",
-        "facebook.com",
-        "instagram.com",
-        "quora.com",
-        "pinterest.com",
-        "tiktok.com",
-        "tumblr.com",
-        "news.ycombinator.com",
-    })
 
     TOPIC_FAMILY_ALIASES = {
         "pet_care": "animal_care",
@@ -1819,7 +2284,7 @@ class WebResearchEngine:
         stats["primary_variant"] = primary_variant
 
         query_terms = self._query_terms(query)
-        tier_rank = {"tier1": 0, "tier2": 1, "tier3": 2}
+        tier_rank = {"tier1": 0, "tier2": 1, "tier3": 2, "banned_sources": 3}
         scored_rows: list[dict[str, Any]] = []
         by_variant: dict[str, list[dict[str, Any]]] = {}
         for row in seeds:
@@ -2209,42 +2674,14 @@ class WebResearchEngine:
         if not value:
             return "tier3", 0.45
         domain = value[4:] if value.startswith("www.") else value
-        if self._domain_matches(
-            domain,
-            (
-            self.TRUST_TIER_1
-            | self.TRUST_TIER_1_SPORTS
-            | self.TRUST_TIER_1_ACADEMIC
-            | self.TRUST_TIER_1_LEGAL
-            ),
-        ):
+        if self._domain_matches(domain, self.BANNED_SOURCES):
+            return "banned_sources", 0.02
+        if self._domain_matches(domain, self.TRUST_TIER_1):
             return "tier1", 1.0
-        if self._domain_matches(
-            domain,
-            (
-            self.TRUST_TIER_2
-            | self.TRUST_TIER_2_INDIE
-            | self.TRUST_TIER_2_MAINSTREAM_SPORTS
-            | self.TRUST_TIER_2_PROSUMER_TECH
-            | self.TRUST_TIER_2_GAMING
-            | self.TRUST_TIER_2_FILM_TV
-            | self.TRUST_TIER_2_MUSIC
-            | self.TRUST_TIER_2_HEALTH
-            | self.TRUST_TIER_2_FINANCE
-            | self.TRUST_TIER_2_BUSINESS
-            | self.TRUST_TIER_2_REAL_ESTATE
-            | self.TRUST_TIER_2_AUTOMOTIVE
-            | self.TRUST_TIER_2_ART
-            | self.TRUST_TIER_2_LEGAL
-            | self.TRUST_TIER_2_EDUCATION
-            | self.TRUST_TIER_2_TRAVEL
-            | self.TRUST_TIER_2_ANIMAL_CARE
-            | self.TRUST_TIER_2_FOOD
-            | self.TRUST_TIER_2_BOOKS
-            | self.TRUST_TIER_2_PARENTING
-            ),
-        ):
+        if self._domain_matches(domain, self.TRUST_TIER_2):
             return "tier2", 0.78
+        if self._domain_matches(domain, self.TRUST_TIER_3):
+            return "tier3", 0.52
         return "tier3", 0.45
 
     def _domain_matches(self, domain: str, candidates: set[str] | tuple[str, ...]) -> bool:
@@ -2323,77 +2760,31 @@ class WebResearchEngine:
     def _topic_domain_bonus(self, host: str, topic_type: str) -> float:
         topic = str(topic_type or "").strip().lower()
         domain = host[4:] if host.startswith("www.") else host
+        if not domain:
+            return 0.0
+        if self._domain_matches(domain, self.BANNED_SOURCES):
+            return -0.60
+
+        # Coding/development runs should prefer exact primary documentation,
+        # security advisories, release notes, package registries, and maintained
+        # repos. Other topics still benefit from the same general source tiers.
         if topic == "technical":
-            if self._domain_matches(domain, self.TRUST_TIER_1_ACADEMIC) or self._domain_matches(domain, self.TRUST_TIER_2_PROSUMER_TECH):
-                return 0.06
-            if any(tag in domain for tag in ("docs.", "developer.", "readthedocs", "github.com")):
-                return 0.04
-            # Hard-demote social/feed/forum pages for technical queries — they
-            # crowd out official docs and repo sources without adding signal.
-            # -0.35 drops a tier2 domain (base 0.78) below the tier3 floor (0.45).
-            if self._domain_matches(domain, self.TECHNICAL_SOCIAL_DEMOTE):
-                return -0.35
-        elif topic == "finance":
-            if self._domain_matches(domain, self.TRUST_TIER_1) or self._domain_matches(domain, self.TRUST_TIER_2_FINANCE):
-                return 0.06
-        elif topic == "current_events":
-            if self._domain_matches(domain, {"reuters.com", "apnews.com", "bbc.com", "nytimes.com", "wsj.com"}):
-                return 0.06
             if self._domain_matches(domain, self.TRUST_TIER_1):
+                return 0.08
+            if self._domain_matches(domain, self.TRUST_TIER_2):
                 return 0.04
-        elif topic == "law":
-            if self._domain_matches(domain, self.TRUST_TIER_1_LEGAL) or self._domain_matches(domain, self.TRUST_TIER_2_LEGAL):
-                return 0.06
-            if domain.endswith(".gov"):
-                return 0.05
-        elif topic == "education":
-            if self._domain_matches(domain, self.TRUST_TIER_2_EDUCATION) or domain.endswith(".edu"):
-                return 0.06
-        elif topic == "travel":
-            if self._domain_matches(domain, self.TRUST_TIER_2_TRAVEL):
-                return 0.06
-            if self._domain_matches(domain, {"travel.state.gov", "tsa.gov"}):
-                return 0.05
-        elif topic == "animal_care":
-            if self._domain_matches(domain, self.TRUST_TIER_2_ANIMAL_CARE) or self._domain_matches(domain, self.TRUST_TIER_2_HEALTH):
-                return 0.06
-        elif topic == "food":
-            if self._domain_matches(domain, self.TRUST_TIER_2_FOOD) or self._domain_matches(domain, self.TRUST_TIER_2_HEALTH):
-                return 0.05
-        elif topic == "books":
-            if self._domain_matches(domain, self.TRUST_TIER_2_BOOKS):
-                return 0.05
-        elif topic == "parenting":
-            if self._domain_matches(domain, self.TRUST_TIER_2_PARENTING) or self._domain_matches(domain, self.TRUST_TIER_2_HEALTH):
-                return 0.05
-        elif topic == "business":
-            if self._domain_matches(domain, self.TRUST_TIER_2_BUSINESS) or self._domain_matches(domain, self.TRUST_TIER_2_FINANCE):
-                return 0.06
-        elif topic == "real_estate":
-            if self._domain_matches(domain, self.TRUST_TIER_2_REAL_ESTATE):
-                return 0.06
-            if self._domain_matches(domain, {"hud.gov", "census.gov"}):
-                return 0.05
-        elif topic == "gaming":
-            if self._domain_matches(domain, self.TRUST_TIER_2_GAMING):
-                return 0.06
-        elif topic == "automotive":
-            if self._domain_matches(domain, self.TRUST_TIER_2_AUTOMOTIVE):
-                return 0.06
-            if self._domain_matches(domain, {"nhtsa.gov", "fueleconomy.gov"}):
-                return 0.05
-        elif topic == "tv_shows":
-            if self._domain_matches(domain, self.TRUST_TIER_2_FILM_TV):
-                return 0.06
-        elif topic == "movies":
-            if self._domain_matches(domain, self.TRUST_TIER_2_FILM_TV):
-                return 0.06
-        elif topic == "music":
-            if self._domain_matches(domain, self.TRUST_TIER_2_MUSIC):
-                return 0.06
-        elif topic == "art":
-            if self._domain_matches(domain, self.TRUST_TIER_2_ART):
-                return 0.06
+            if self._domain_matches(domain, self.TRUST_TIER_3):
+                return -0.04
+            if any(tag in domain for tag in ("docs.", "developer.", "api.", "registry.", "packages.", "readthedocs")):
+                return 0.03
+            return 0.0
+
+        if self._domain_matches(domain, self.TRUST_TIER_1):
+            return 0.04
+        if self._domain_matches(domain, self.TRUST_TIER_2):
+            return 0.02
+        if self._domain_matches(domain, self.TRUST_TIER_3):
+            return -0.02
         return 0.0
 
     def _topic_signal_bonus(self, title: str, snippet: str, topic_type: str) -> float:
@@ -2558,15 +2949,22 @@ class WebResearchEngine:
             query_terms=query_terms,
         )
         score -= low_signal_penalty
+        banned_source = tier_name == "banned_sources"
+        if banned_source:
+            quality_flags = list(quality_flags) + ["banned_source_domain"]
+            quality_blocked = True
         payload["source_domain"] = host
         payload["source_tier"] = tier_name
         payload = enrich_source_metadata(payload, query=query, topic_type=topic_type)
-        score += float(payload.get("freshness_score", 0.0)) * 0.08
-        score += float(payload.get("volatility_fit_score", 0.0)) * 0.05
-        if bool(payload.get("stale_for_query", False)):
-            score -= 0.08
-        score += self._domain_rep.get_adjustment(host)
-        score = max(0.05, min(1.0, round(score, 3)))
+        if not banned_source:
+            score += float(payload.get("freshness_score", 0.0)) * 0.08
+            score += float(payload.get("volatility_fit_score", 0.0)) * 0.05
+            if bool(payload.get("stale_for_query", False)):
+                score -= 0.08
+            score += self._domain_rep.get_adjustment(host)
+            score = max(0.05, min(1.0, round(score, 3)))
+        else:
+            score = 0.02
         payload["source_score"] = score
         payload["query_term_hits"] = int(query_hit_count)
         payload["quality_penalty"] = float(low_signal_penalty)
@@ -2586,9 +2984,9 @@ class WebResearchEngine:
             return [], {
                 "enabled": bool(enabled),
                 "applied": False,
-                "strategy": "domain_tier_v1",
+                "strategy": "developer_domain_tiers_v1",
                 "topic_type": resolved_topic,
-                "tier_counts": {"tier1": 0, "tier2": 0, "tier3": 0},
+                "tier_counts": {"tier1": 0, "tier2": 0, "tier3": 0, "banned_sources": 0},
                 "top_score": 0.0,
             }
 
@@ -2620,7 +3018,7 @@ class WebResearchEngine:
                     reverse=True,
                 )
 
-        tier_counts = {"tier1": 0, "tier2": 0, "tier3": 0}
+        tier_counts = {"tier1": 0, "tier2": 0, "tier3": 0, "banned_sources": 0}
         for row in scored:
             tier = str(row.get("source_tier", "tier3"))
             if tier not in tier_counts:
@@ -2631,7 +3029,7 @@ class WebResearchEngine:
         summary = {
             "enabled": bool(enabled),
             "applied": bool(enabled),
-            "strategy": "domain_tier_v2_freshness",
+            "strategy": "developer_domain_tiers_v1_freshness",
             "topic_type": resolved_topic,
             "tier_counts": tier_counts,
             "top_score": float(scored[0].get("source_score", 0.0)),
@@ -4157,8 +4555,8 @@ class WebResearchEngine:
                 "source_scoring_summary": {
                     "enabled": bool(settings.get("source_scoring_enabled", True)),
                     "applied": False,
-                    "strategy": "domain_tier_v1",
-                    "tier_counts": {"tier1": 0, "tier2": 0, "tier3": 0},
+                    "strategy": "developer_domain_tiers_v1",
+                    "tier_counts": {"tier1": 0, "tier2": 0, "tier3": 0, "banned_sources": 0},
                     "top_score": 0.0,
                 },
                 "conflict_detection_enabled": bool(settings.get("conflict_detection_enabled", True)),
@@ -4283,8 +4681,8 @@ class WebResearchEngine:
                 "source_scoring_summary": {
                     "enabled": bool(settings.get("source_scoring_enabled", True)),
                     "applied": False,
-                    "strategy": "domain_tier_v1",
-                    "tier_counts": {"tier1": 0, "tier2": 0, "tier3": 0},
+                    "strategy": "developer_domain_tiers_v1",
+                    "tier_counts": {"tier1": 0, "tier2": 0, "tier3": 0, "banned_sources": 0},
                     "top_score": 0.0,
                 },
                 "conflict_detection_enabled": bool(settings.get("conflict_detection_enabled", True)),
@@ -4365,7 +4763,7 @@ class WebResearchEngine:
         source_scoring_summary["context_min_source_score"] = round(float(quality_min_score), 2)
         source_scoring_summary["quality_blocked_count"] = int(quality_blocked_count)
         source_scoring_summary["quality_filtered_out"] = max(0, raw_source_count - len(sources))
-        post_filter_tiers = {"tier1": 0, "tier2": 0, "tier3": 0}
+        post_filter_tiers = {"tier1": 0, "tier2": 0, "tier3": 0, "banned_sources": 0}
         for row in sources:
             tier = str(row.get("source_tier", "tier3"))
             if tier not in post_filter_tiers:
@@ -4568,7 +4966,7 @@ class WebResearchEngine:
                     source_scoring_summary["context_min_source_score"] = round(float(quality_min_score), 2)
                     source_scoring_summary["quality_blocked_count"] = int(quality_blocked_count)
                     source_scoring_summary["quality_filtered_out"] = max(0, raw_source_count - len(sources))
-                    post_filter_tiers = {"tier1": 0, "tier2": 0, "tier3": 0}
+                    post_filter_tiers = {"tier1": 0, "tier2": 0, "tier3": 0, "banned_sources": 0}
                     for row in sources:
                         tier = str(row.get("source_tier", "tier3"))
                         if tier not in post_filter_tiers:
@@ -4695,10 +5093,11 @@ class WebResearchEngine:
             f"- source_scoring_enabled: {source_scoring_enabled}",
             f"- source_scoring_applied: {bool(source_scoring_summary.get('applied', False))}",
             (
-                "- source_tier_counts: "
+                "- source_tier_counts_t1_t2_t3_banned: "
                 f"{source_scoring_summary.get('tier_counts', {}).get('tier1', 0)}/"
                 f"{source_scoring_summary.get('tier_counts', {}).get('tier2', 0)}/"
-                f"{source_scoring_summary.get('tier_counts', {}).get('tier3', 0)}"
+                f"{source_scoring_summary.get('tier_counts', {}).get('tier3', 0)}/"
+                f"{source_scoring_summary.get('tier_counts', {}).get('banned_sources', 0)}"
             ),
             f"- source_score_top: {float(source_scoring_summary.get('top_score', 0.0)):.2f}",
             f"- context_min_source_score: {float(source_scoring_summary.get('context_min_source_score', settings.get('context_min_source_score', 0.62))):.2f}",

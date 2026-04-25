@@ -10,7 +10,13 @@ from urllib.parse import urlsplit
 from typing import Any, Callable
 
 from agents_research.citation_linker import build_retrieved_chunks
+from agents_research.numeric_validator import validate as validate_numeric_claims
 from agents_research.synthesizer import SynthesisUnavailableError, run_skeptic_pass, run_skeptic_pass_with_severity, synthesize
+from agents_research.translation_chain import (
+    enforce_final_summary_contract,
+    ensure_project_specificity,
+    run_translation_chain,
+)
 from shared_tools.answer_composer import evaluate_answer_confidence
 from shared_tools.config_ini import load_config
 from shared_tools.embedding_memory import _vec_cosine
@@ -31,7 +37,7 @@ _URL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _WEB_CONTEXT_SOURCE_RE = re.compile(
-    r"^\-\s(?:\[(?P<tier>tier[123])(?:\s+[^\]]*)?\]\s*)?.*\|\s+(?P<url>https?://\S+)\s*$",
+    r"^\-\s(?:\[(?P<tier>tier[1234])(?:\s+[^\]]*)?\]\s*)?.*\|\s+(?P<url>https?://\S+)\s*$",
     re.IGNORECASE,
 )
 _SELF_SCORE_RE = re.compile(
@@ -73,7 +79,7 @@ def _extract_web_source_evidence(web_context: str) -> list[dict[str, str]]:
                 evidence.append(current)
             url = _normalize_source_url(match.group("url"))
             tier = str(match.group("tier") or "").strip().lower()
-            source_tier = tier if tier in {"tier1", "tier2", "tier3"} else ""
+            source_tier = tier if tier in {"tier1", "tier2", "tier3", "tier4"} else ""
             current = {
                 "url": url,
                 "domain": _domain_from_url(url),
@@ -104,7 +110,7 @@ def _build_url_tier_map(source_evidence: list[dict[str, str]] | None) -> dict[st
             continue
         url = _normalize_source_url(row.get("url", ""))
         tier = str(row.get("source_tier", "")).strip().lower()
-        if not url or tier not in {"tier1", "tier2", "tier3"}:
+        if not url or tier not in {"tier1", "tier2", "tier3", "tier4"}:
             continue
         out[url] = tier
     return out
@@ -113,7 +119,7 @@ def _build_url_tier_map(source_evidence: list[dict[str, str]] | None) -> dict[st
 def _tier_breakdown_for_finding(finding_text: str, url_tier_map: dict[str, str]) -> dict[str, int]:
     """Count tier distribution of URLs cited in a single agent finding."""
     urls = _SOURCE_MARKER_URL_RE.findall(str(finding_text or ""))
-    counts = {"tier1": 0, "tier2": 0, "tier3": 0}
+    counts = {"tier1": 0, "tier2": 0, "tier3": 0, "tier4": 0}
     for url in urls:
         normalized = _normalize_source_url(url)
         tier = (
@@ -181,37 +187,42 @@ def _audit_evidence_labels(findings: list[dict]) -> list[dict]:
     result: list[dict] = []
     for item in findings:
         text = str(item.get("finding", ""))
-        if "[E]" not in text:
+        if "[E]" not in text and "[A]" not in text:
             result.append(item)
             continue
         source_evidence = [dict(x) for x in item.get("source_evidence", []) if isinstance(x, dict)]
-        source_domains = {
-            str(x.get("domain", "")).strip().lower()
-            for x in source_evidence
-            if str(x.get("domain", "")).strip()
-        }
         source_urls = [str(x.get("url", "")).strip() for x in source_evidence if str(x.get("url", "")).strip()]
+        source_tier_map = {
+            _normalize_source_url(str(x.get("url", "")).strip()): str(x.get("source_tier", "")).strip().lower()
+            for x in source_evidence
+            if str(x.get("url", "")).strip()
+        }
         alignment_scores: list[float] = []
         lines = text.split("\n")
         new_lines: list[str] = []
-        for i, line in enumerate(lines):
+        for line in lines:
             if "[E]" not in line:
                 new_lines.append(line)
                 continue
-            window = line + (" " + lines[i + 1] if i + 1 < len(lines) else "")
-            if _URL_PATTERN.search(window):
-                new_lines.append(line)
+            urls_in_line = [u.rstrip("/,.") for u in _URL_PATTERN.findall(line) if str(u).strip()]
+            if not urls_in_line:
+                # Phase 1 discipline gate: [E] must include a source URL in the same line.
+                score = _alignment(line, source_evidence)
+                alignment_scores.append(score)
+                new_lines.append(line.replace("[E]", "[I]", 1))
                 continue
-            low_window = window.lower()
-            if any(domain and domain in low_window for domain in source_domains):
-                new_lines.append(line)
+            normalized_urls = [_normalize_source_url(url) for url in urls_in_line]
+            tiers = [
+                source_tier_map.get(url)
+                or source_tier_map.get(url.rstrip("/,."))
+                or "tier3"
+                for url in normalized_urls
+            ]
+            if tiers and all(str(t).strip().lower() == "tier4" for t in tiers):
+                # Analogy-only sources cannot be promoted to direct evidence.
+                new_lines.append(line.replace("[E]", "[A]", 1))
                 continue
-            score = _alignment(line, source_evidence)
-            alignment_scores.append(score)
-            if score >= 0.55 and source_urls:
-                new_lines.append(line)
-                continue
-            new_lines.append(line.replace("[E]", "[I]"))
+            new_lines.append(line)
         new_item = dict(item)
         new_item["finding"] = "\n".join(new_lines)
         if source_urls:
@@ -659,12 +670,6 @@ def _profile_agent_templates(profile: str) -> list[dict[str, Any]]:
                 ),
             },
             {
-                "persona": STATISTICAL_ANALYSIS_PERSONA,
-                "model": STATISTICAL_ANALYSIS_MODEL,
-                "directive": STATISTICAL_ANALYSIS_DIRECTIVE,
-                "role": "advisory",
-            },
-            {
                 "persona": LEGAL_ANALYSIS_PERSONA,
                 "model": LEGAL_ANALYSIS_MODEL,
                 "directive": LEGAL_ANALYSIS_DIRECTIVE,
@@ -749,12 +754,6 @@ def _profile_agent_templates(profile: str) -> list[dict[str, Any]]:
                 "directive": LEGAL_ANALYSIS_DIRECTIVE,
                 "role": "advisory",
             },
-            {
-                "persona": STATISTICAL_ANALYSIS_PERSONA,
-                "model": STATISTICAL_ANALYSIS_MODEL,
-                "directive": STATISTICAL_ANALYSIS_DIRECTIVE,
-                "role": "advisory",
-            },
         ]
     if profile == ANALYSIS_PROFILE_HISTORY:
         return [
@@ -808,12 +807,6 @@ def _profile_agent_templates(profile: str) -> list[dict[str, Any]]:
                     "Focus on real-world applications, technology readiness level, practical implications, "
                     "and how this science connects to existing technologies or societal challenges."
                 ),
-            },
-            {
-                "persona": STATISTICAL_ANALYSIS_PERSONA,
-                "model": STATISTICAL_ANALYSIS_MODEL,
-                "directive": STATISTICAL_ANALYSIS_DIRECTIVE,
-                "role": "advisory",
             },
         ]
     if profile == ANALYSIS_PROFILE_MATH:
@@ -966,12 +959,6 @@ def _profile_agent_templates(profile: str) -> list[dict[str, Any]]:
                 "Focus on second-order effects, downstream consequences, stakeholder impacts, "
                 "and what matters most for someone who needs to act on this."
             ),
-        },
-        {
-            "persona": STATISTICAL_ANALYSIS_PERSONA,
-            "model": STATISTICAL_ANALYSIS_MODEL,
-            "directive": STATISTICAL_ANALYSIS_DIRECTIVE,
-            "role": "advisory",
         },
     ]
 
@@ -1701,6 +1688,7 @@ def run_research_pool(
     yield_checker: Callable[[], bool] | None = None,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     topic_type: str = "general",
+    project_context: str = "",
 ) -> dict:
     bus.emit("research_pool", "start", {"question": question, "project": project_slug})
     _refresh_dynamic_models(repo_root)
@@ -2042,6 +2030,27 @@ def run_research_pool(
         )
     reliability = _reliability_summary(findings)
     findings = _audit_evidence_labels(findings)
+    _progress(
+        "numeric_validation_started",
+        {"findings_collected": len(findings)},
+    )
+    try:
+        findings, numeric_validation = validate_numeric_claims(
+            findings,
+            source_evidence=source_evidence,
+            client=client,
+            repo_root=repo_root,
+        )
+    except Exception as exc:
+        LOGGER.warning("numeric validation failed: %s", exc)
+        numeric_validation = {"numeric_claims_seen": 0, "numeric_claims_flagged": 0}
+    _progress(
+        "numeric_validation_completed",
+        {
+            "numeric_claims_seen": int(numeric_validation.get("numeric_claims_seen", 0) or 0),
+            "numeric_claims_flagged": int(numeric_validation.get("numeric_claims_flagged", 0) or 0),
+        },
+    )
     for item in findings:
         if not isinstance(item, dict):
             continue
@@ -2122,6 +2131,7 @@ def run_research_pool(
             "raw_path": str(raw_path),
             "web_context_used": bool(web_context.strip()),
             "reliability": reliability,
+            "numeric_validation": numeric_validation,
             "canceled": True,
             "cancel_summary": cancel_summary,
             "retrieved_chunks": retrieved_chunks,
@@ -2256,6 +2266,7 @@ def run_research_pool(
                 "raw_path": str(raw_path),
                 "web_context_used": bool(web_context.strip()),
                 "reliability": reliability,
+                "numeric_validation": numeric_validation,
                 "synthesis_unavailable": True,
                 "findings": findings,
                 "retrieved_chunks": [],
@@ -2301,6 +2312,7 @@ def run_research_pool(
                 "raw_path": str(raw_path),
                 "web_context_used": bool(web_context.strip()),
                 "reliability": reliability,
+                "numeric_validation": numeric_validation,
                 "synthesis_unavailable": True,
                 "findings": findings,
                 "retrieved_chunks": [],
@@ -2330,6 +2342,48 @@ def run_research_pool(
                 "note": "Critique pass finished.",
             },
         )
+
+    translation_meta: dict[str, Any] = {"stages": []}
+    _progress(
+        "translation_chain_started",
+        {"stages": 4},
+    )
+    try:
+        _synth_lane_cfg = lane_model_config(repo_root, "synthesis") or {}
+        _premium_cfg = _synth_lane_cfg.get("tier_premium", {}) if isinstance(_synth_lane_cfg.get("tier_premium", {}), dict) else {}
+        _premium_model = str(_premium_cfg.get("model", "")).strip()
+        _use_premium_tech = bool(_premium_model and _premium_model == str(synth_cfg.get("model", "")).strip())
+        translation_meta = run_translation_chain(
+            question=question,
+            synthesis_summary=summary_md,
+            project_context=project_context,
+            client=client,
+            repo_root=repo_root,
+            synthesis_cfg=synth_cfg,
+            use_premium_tech_lead=_use_premium_tech,
+        )
+        summary_md = str(translation_meta.get("summary", "") or summary_md).strip()
+    except Exception as exc:
+        LOGGER.warning("translation_chain failed: %s", exc)
+    _progress(
+        "translation_chain_completed",
+        {
+            "stages": len(translation_meta.get("stages", []) if isinstance(translation_meta, dict) else []),
+        },
+    )
+
+    summary_md = ensure_project_specificity(summary_md, project_context)
+    analogy_urls = [
+        str(row.get("url", "")).strip()
+        for row in source_evidence
+        if isinstance(row, dict) and str(row.get("source_tier", "")).strip().lower() == "tier4" and str(row.get("url", "")).strip()
+    ]
+    summary_md = enforce_final_summary_contract(
+        summary_md=summary_md,
+        findings=findings,
+        source_quality_warning=warning_banner,
+        analogy_sources=analogy_urls,
+    )
 
     recycled_questions = _count_recycled_open_questions(summary_md, prior_open_questions)
     quality_suffix = ""
@@ -2371,20 +2425,22 @@ def run_research_pool(
         {
             "project": project_slug,
             "raw_path": str(raw_path),
-                "summary_path": str(summary_path),
-                "critique_path": critique_path,
-                "model": model_cfg.get("model", ""),
-                "workers": worker_count,
-                "agents_total": len(agents),
-                "models_used": sorted({str(x.get("model", "")).strip() for x in findings if str(x.get("model", "")).strip()}),
-                "web_context_used": bool(web_context.strip()),
-                "reliability": reliability,
-                "analysis_profile": profile_name,
-                "topic_type": resolved_type,
-                "recycled_open_questions": recycled_questions,
-                "warning_banner": warning_banner,
-            },
-        )
+            "summary_path": str(summary_path),
+            "critique_path": critique_path,
+            "model": model_cfg.get("model", ""),
+            "workers": worker_count,
+            "agents_total": len(agents),
+            "models_used": sorted({str(x.get("model", "")).strip() for x in findings if str(x.get("model", "")).strip()}),
+            "web_context_used": bool(web_context.strip()),
+            "reliability": reliability,
+            "analysis_profile": profile_name,
+            "topic_type": resolved_type,
+            "recycled_open_questions": recycled_questions,
+            "warning_banner": warning_banner,
+            "numeric_validation": numeric_validation,
+            "translation_stages": len(translation_meta.get("stages", []) if isinstance(translation_meta, dict) else []),
+        },
+    )
 
     return {
         "message": (
@@ -2397,10 +2453,12 @@ def run_research_pool(
         "raw_path": str(raw_path),
         "web_context_used": bool(web_context.strip()),
         "reliability": reliability,
+        "numeric_validation": numeric_validation,
         "analysis_profile": profile_name,
         "topic_type": resolved_type,
         "recycled_open_questions": recycled_questions,
         "warning_banner": warning_banner,
+        "translation_chain": translation_meta,
         "findings": findings,
         "retrieved_chunks": retrieved_chunks,
         "visited_agents_per_leaf": visited_agents_per_leaf,

@@ -37,6 +37,7 @@ class ResearchPoolAgent(BaseAgentExecutor):
             yield_checker=task.yield_checker,
             progress_callback=task.progress_callback,
             topic_type=str(task.context.get("topic_type", "general") or "general"),
+            project_context=str(task.context.get("project_context", "") or ""),
         )
         return WorkerResult.from_legacy("research", result)
 

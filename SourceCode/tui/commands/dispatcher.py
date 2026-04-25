@@ -26,6 +26,52 @@ from shared_tools.stack_recommender import recommend_detect, recommend_greenfiel
 from agents_make.stack_builder_pool import build as build_stack
 
 
+_FORAGE_STAGE_LABELS: dict[str, str] = {
+    "orchestrator_received":   "routing",
+    "lane_routed":             "lane selected",
+    "research_pool_started":   "agents starting",
+    "research_agent_started":  "agent running",
+    "research_agent_completed":"agent done",
+    "web_research_started":    "web research starting",
+    "web_source_discovered":   "source found",
+    "persona_queries_planned": "persona queries planned",
+    "web_stack_ready":         "web context ready",
+    "numeric_validation_started": "checking numerics",
+    "numeric_validation_completed": "numeric check done",
+    "gap_fill_started":        "filling gaps",
+    "gap_fill_completed":      "gaps filled",
+    "skeptic_pass_started":    "skeptic reviewing",
+    "skeptic_pass_completed":  "review done",
+    "translation_chain_started": "project implications running",
+    "translation_chain_completed": "project implications ready",
+    "stack_builder_started":   "building output",
+    "stack_builder_done":      "synthesis complete",
+    "research_cancel_requested": "cancelling",
+    "foraging_paused":         "paused",
+}
+
+_FOX_PERSONA = """\
+You are Fox, the coding assistant for Foxforge-code.
+The orchestration layer that runs research and builds behind you is called DeepFox.
+
+You help developers build software. That is your only job here.
+
+Style:
+- Direct and concise. No preamble, no filler, no sign-off.
+- Answer the question asked. If something needs a decision, say which option you'd pick and why in one sentence.
+- When you don't know something, say so plainly.
+- No personality performance — no wit, no warmth for its own sake, no theatrical responses.
+- Short answers for short questions. Long answers only when the complexity earns it.
+- Write code when code is the right answer. Explain when explanation is the right answer.
+
+Scope:
+- You help with planning, architecture, implementation, debugging, and code review for the active project.
+- You do not fetch live data or search the web. If you don't have enough to answer, say so and suggest the user run /forage <query> to search for it.
+- You do not do general chat, life advice, or anything outside of building software.
+- If asked something outside that scope, redirect once, briefly.\
+"""
+
+
 @dataclass(slots=True)
 class DispatcherState:
     active_project_slug: str = ""
@@ -37,6 +83,7 @@ class CommandOutcome:
     text: str
     error: bool = False
     active_project_slug: str = ""
+    render_md: bool = False
 
 
 class CommandDispatcher:
@@ -45,7 +92,7 @@ class CommandDispatcher:
         self.project_engine = ProjectEngine(self.repo_root)
         self.plan_store = PlanStore(self.repo_root)
 
-    def dispatch(self, raw: str, state: DispatcherState) -> CommandOutcome:
+    def dispatch(self, raw: str, state: DispatcherState, progress_fn=None) -> CommandOutcome:
         text = str(raw or "").strip()
         if not text:
             return CommandOutcome("", active_project_slug=state.active_project_slug)
@@ -75,7 +122,9 @@ class CommandDispatcher:
             if command == "/msg":
                 return self._handle_msg(" ".join(args), state)
             if command == "/forage":
-                return self._cmd_forage(args, state)
+                return self._cmd_forage(args, state, progress_fn=progress_fn)
+            if command == "/view":
+                return self._cmd_view(args, state)
             if command == "/plan":
                 return self._cmd_plan(args, state)
             if command == "/execute":
@@ -170,6 +219,7 @@ class CommandDispatcher:
         )
         build_stack(project, "Initial scaffold from /new", repo_root=self.repo_root)
         self._create_project_conversation(state, project["slug"])
+        self._seed_project_memory(project["slug"], description)
         state.active_project_slug = project["slug"]
         return CommandOutcome(
             "\n".join(
@@ -230,6 +280,7 @@ class CommandDispatcher:
             workspace_path=str(workspace),
         )
         self._create_project_conversation(state, project["slug"])
+        self._seed_project_memory(project["slug"], f"Imported workspace from {source}. Stack: {json.dumps(stack)}.")
         state.active_project_slug = project["slug"]
 
         return CommandOutcome(
@@ -268,6 +319,28 @@ class CommandDispatcher:
             active_project_slug=state.active_project_slug,
         )
 
+    def _seed_project_memory(self, slug: str, description: str) -> None:
+        pass  # project_context_memory is dog-domain specific; context injected directly in _handle_msg
+
+    def _project_context_block(self, slug: str) -> str | None:
+        try:
+            project = self.project_engine.get_by_slug(slug)
+            if not project:
+                return None
+            lines = [f"Active coding project: {project.get('name', slug)}"]
+            desc = str(project.get("description") or "").strip()
+            if desc:
+                lines.append(f"Description: {desc}")
+            stack = project.get("stack")
+            if stack:
+                lines.append(f"Stack: {json.dumps(stack)}")
+            workspace = str(project.get("workspace_path") or "").strip()
+            if workspace:
+                lines.append(f"Workspace: {workspace}")
+            return "\n".join(lines)
+        except Exception:
+            return None
+
     def _handle_msg(self, text: str, state: DispatcherState) -> CommandOutcome:
         if not text.strip():
             return CommandOutcome("", active_project_slug=state.active_project_slug)
@@ -277,19 +350,123 @@ class CommandDispatcher:
         history = list(conv.get("messages") or [])[-20:]
         store.add_message(conv["id"], "user", text, mode="talk")
 
+        context_block = self._project_context_block(project)
         orch = FoxforgeOrchestrator(self.repo_root)
-        reply = orch.conversation_reply(text, history=history, project=project)
+        persona = _FOX_PERSONA
+        if context_block:
+            persona = persona + f"\n\nActive project:\n{context_block}"
+        reply = orch.conversation_reply(text, history=history, project=project, persona_override=persona, disable_web=True)
         store.add_message(conv["id"], "assistant", reply, mode="talk")
         return CommandOutcome(reply, active_project_slug=state.active_project_slug)
 
-    def _cmd_forage(self, args: list[str], state: DispatcherState) -> CommandOutcome:
+    def _cmd_forage(self, args: list[str], state: DispatcherState, progress_fn=None) -> CommandOutcome:
         prompt = " ".join(args).strip()
         if not prompt:
             return CommandOutcome("Usage: /forage <query>", error=True, active_project_slug=state.active_project_slug)
         project = state.active_project_slug or "general"
         orch = FoxforgeOrchestrator(self.repo_root)
-        out = orch.conversation_reply(f"/forage {prompt}", project=project)
+        orch.set_project(project)
+
+        def _progress(stage: str, detail=None) -> None:
+            if not callable(progress_fn):
+                return
+            label = _FORAGE_STAGE_LABELS.get(stage, stage.replace("_", " "))
+            extra = ""
+            if isinstance(detail, dict):
+                agent = detail.get("agent", "")
+                if agent and stage in ("research_agent_started", "research_agent_completed"):
+                    name = agent.replace("_", " ")
+                    done = detail.get("completed", "")
+                    total = detail.get("total", "")
+                    suffix = f" {done}/{total}" if done != "" and total != "" else ""
+                    verb = "done" if stage == "research_agent_completed" else "running"
+                    extra = f": {name} {verb}{suffix}"
+                elif detail.get("agents_total"):
+                    extra = f" ({detail['agents_total']} agents)"
+                elif detail.get("url") or detail.get("source"):
+                    url = detail.get("url") or detail.get("source")
+                    extra = f": {str(url)[:80]}"
+                elif detail.get("gap_queries"):
+                    extra = f" ({len(detail['gap_queries'])} queries)"
+            elif isinstance(detail, str) and detail.strip():
+                extra = f": {detail.strip()[:100]}"
+            progress_fn(f"{label}{extra}")
+
+        out = orch.handle_message(prompt, force_research=True, progress_callback=_progress)
         return CommandOutcome(str(out or "Research completed."), active_project_slug=state.active_project_slug)
+
+    def _cmd_view(self, args: list[str], state: DispatcherState) -> CommandOutcome:
+        slug = state.active_project_slug or "general"
+        flags = {a.lstrip("-") for a in args if a.startswith("--")}
+        fancy = "fancy" in flags
+
+        project = self.project_engine.get_by_slug(slug)
+        workspace = Path(project["workspace_path"]) if project else None
+
+        if not workspace or not workspace.exists():
+            return CommandOutcome("No active project workspace found.", error=True, active_project_slug=state.active_project_slug)
+
+        if "summary" in flags or not flags or flags == {"fancy"}:
+            # Real summaries match *_research_summary.md — exclude library index and critique files
+            summaries = sorted(
+                [
+                    f for f in (workspace / "research_summaries").glob("*.md")
+                    if f.name.endswith("_research_summary.md") and f.name[0].isdigit()
+                ],
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            ) if (workspace / "research_summaries").exists() else []
+            target = summaries[0] if summaries else None
+            if not target:
+                target = self._latest_file(workspace)
+        elif "raw" in flags:
+            # Real raws match *_research_raw.md — exclude library index files
+            raws = sorted(
+                [
+                    f for f in (workspace / "research_raw").glob("*.md")
+                    if f.name.endswith("_research_raw.md")
+                ],
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            ) if (workspace / "research_raw").exists() else []
+            target = raws[0] if raws else None
+        else:
+            target = self._latest_file(workspace)
+
+        if not target:
+            return CommandOutcome("No files found for this project.", error=True, active_project_slug=state.active_project_slug)
+
+        if fancy:
+            from SourceCode.tui.widgets.reasoning_stream import _grip_port
+            import subprocess as _sp
+            port = _grip_port(str(target))
+            import time as _time; _time.sleep(0.8)  # let grip bind before browser hits it
+            _sp.Popen(["xdg-open", f"http://localhost:{port}"],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            return CommandOutcome(
+                f"Opened {target.name} in browser → http://localhost:{port}",
+                active_project_slug=state.active_project_slug,
+            )
+
+        # Render in TUI
+        try:
+            content = target.read_text(encoding="utf-8")
+        except OSError as exc:
+            return CommandOutcome(f"Could not read {target}: {exc}", error=True, active_project_slug=state.active_project_slug)
+
+        return CommandOutcome(
+            f"**{target.name}**\n\n{content}",
+            active_project_slug=state.active_project_slug,
+            render_md=True,
+        )
+
+    def _latest_file(self, workspace: Path) -> Path | None:
+        """Most recently modified file anywhere in the project workspace."""
+        try:
+            files = [f for f in workspace.rglob("*") if f.is_file()]
+            return max(files, key=lambda f: f.stat().st_mtime) if files else None
+        except Exception:
+            return None
 
     def _generate_plan_markdown(self, prompt: str, *, kind: str) -> str:
         cfg = load_config(self.repo_root)

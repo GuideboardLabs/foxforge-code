@@ -1,0 +1,334 @@
+from __future__ import annotations
+
+import json
+import re
+from difflib import SequenceMatcher
+from pathlib import Path
+from typing import Any
+
+from shared_tools.model_routing import lane_model_config
+
+
+CHAIN_STAGES: list[dict[str, str]] = [
+    {
+        "id": "pm",
+        "label": "Product Manager",
+        "focus": "Translate into concrete user and product implications for this exact project.",
+    },
+    {
+        "id": "market",
+        "label": "Market Analyst",
+        "focus": "Translate into market, category, and competitor implications without repeating PM output.",
+    },
+    {
+        "id": "proj_mgr",
+        "label": "Project Manager",
+        "focus": (
+            "Translate into execution structure and answer explicitly whether this project appears "
+            "new, in-development, in-theory, or already-evolved."
+        ),
+    },
+    {
+        "id": "tech_lead",
+        "label": "Tech Lead",
+        "focus": "Translate into technical implementation guidance tied to the project stack/workspace context.",
+    },
+]
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip()).lower()
+
+
+def _similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return float(SequenceMatcher(None, _plain(a), _plain(b)).ratio())
+
+
+def _extract_bullets(text: str, *, limit: int = 8) -> list[str]:
+    rows: list[str] = []
+    for line in str(text or "").splitlines():
+        m = re.match(r"^\s*(?:[-*]|\d+[.)])\s+(.+)$", line.strip())
+        if not m:
+            continue
+        value = str(m.group(1) or "").strip()
+        if not value:
+            continue
+        rows.append(value)
+        if len(rows) >= max(1, int(limit)):
+            break
+    return rows
+
+
+def _render_stage(label: str, body: str) -> str:
+    cleaned = str(body or "").strip()
+    if not cleaned:
+        cleaned = "- No additional implications generated for this stage."
+    if not cleaned.lstrip().startswith(("-", "*", "1.")):
+        cleaned = "- " + cleaned
+    return f"### {label}\n{cleaned}"
+
+
+def _model_for_stage(
+    *,
+    stage_id: str,
+    synthesis_cfg: dict[str, Any],
+    use_premium_tech_lead: bool,
+) -> str:
+    default_model = str(synthesis_cfg.get("model", "qwen3:8b")).strip() or "qwen3:8b"
+    if stage_id != "tech_lead" or not use_premium_tech_lead:
+        return default_model
+    premium = synthesis_cfg.get("tier_premium", {}) if isinstance(synthesis_cfg.get("tier_premium", {}), dict) else {}
+    premium_model = str(premium.get("model", "")).strip()
+    return premium_model or default_model
+
+
+def run_translation_chain(
+    *,
+    question: str,
+    synthesis_summary: str,
+    project_context: str,
+    client: Any,
+    repo_root: Path,
+    synthesis_cfg: dict[str, Any] | None = None,
+    use_premium_tech_lead: bool = False,
+) -> dict[str, Any]:
+    """Run PM -> Market -> Project Manager -> Tech Lead translation stages."""
+    cfg = dict(synthesis_cfg or lane_model_config(repo_root, "synthesis") or {})
+    fallback = cfg.get("fallback_models", []) if isinstance(cfg.get("fallback_models", []), list) else []
+    stage_outputs: list[dict[str, str]] = []
+    prior_blocks: list[str] = []
+
+    for stage in CHAIN_STAGES:
+        label = str(stage["label"])
+        stage_id = str(stage["id"])
+        model = _model_for_stage(
+            stage_id=stage_id,
+            synthesis_cfg=cfg,
+            use_premium_tech_lead=bool(use_premium_tech_lead),
+        )
+        prior_text = "\n\n".join(prior_blocks)
+        system_prompt = (
+            "You are a translation stage in a research pipeline. "
+            "Return concise markdown bullets only (3-6 bullets). "
+            "Do not parrot prior stages. Add new implications from your role lens."
+        )
+        user_prompt = (
+            f"Research question:\n{str(question or '').strip()}\n\n"
+            f"Synthesis summary:\n{str(synthesis_summary or '').strip()[:6000]}\n\n"
+            f"Project context:\n{str(project_context or '').strip() or 'none'}\n\n"
+            f"Prior stage outputs:\n{prior_text or 'none'}\n\n"
+            f"Your role: {label}\n"
+            f"Role focus: {stage['focus']}\n\n"
+            "Rules:\n"
+            "1) No preamble.\n"
+            "2) No section heading.\n"
+            "3) Mention project-specific details when possible (name, stack, workspace, maturity).\n"
+            "4) Project Manager stage must include one bullet that explicitly states: new / in-development / in-theory / already-evolved.\n"
+        )
+
+        def _call(extra_instruction: str = "") -> str:
+            prompt = user_prompt
+            if extra_instruction:
+                prompt = f"{prompt}\n\n{extra_instruction}"
+            return str(
+                client.chat(
+                    model=model,
+                    fallback_models=fallback,
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                    temperature=0.2,
+                    num_ctx=int(cfg.get("num_ctx", 12288) or 12288),
+                    think=False,
+                    timeout=int(cfg.get("timeout_sec", 420) or 420),
+                    retry_attempts=2,
+                    retry_backoff_sec=1.5,
+                    task_class="translation_chain",
+                    tier="premium" if (stage_id == "tech_lead" and use_premium_tech_lead) else "default",
+                )
+                or ""
+            ).strip()
+
+        output = _call()
+        similarity = max((_similarity(output, prior) for prior in prior_blocks), default=0.0)
+        reran = False
+        if similarity > 0.85:
+            output = _call("Your prior output was too similar. Rewrite with distinct implications and different claims.")
+            reran = True
+
+        cleaned = str(output or "").strip()
+        if not cleaned:
+            cleaned = "- No additional implications generated for this stage."
+
+        stage_outputs.append(
+            {
+                "id": stage_id,
+                "label": label,
+                "content": cleaned,
+                "reran_for_parrot": bool(reran),
+            }
+        )
+        prior_blocks.append(f"{label}:\n{cleaned}")
+
+    chain_sections = ["## Project Implications"]
+    for row in stage_outputs:
+        chain_sections.append(_render_stage(str(row["label"]), str(row["content"])))
+    chain_block = "\n\n".join(chain_sections)
+
+    base = str(synthesis_summary or "").strip()
+    # Replace existing section if present, else append.
+    if re.search(r"^##\s+Project\s+Implications\b", base, flags=re.IGNORECASE | re.MULTILINE):
+        base = re.sub(
+            r"(?is)^##\s+Project\s+Implications\b[\s\S]*$",
+            chain_block,
+            base,
+        ).strip()
+    else:
+        base = f"{base}\n\n{chain_block}".strip()
+
+    return {
+        "summary": base,
+        "stages": stage_outputs,
+    }
+
+
+def ensure_project_specificity(summary_md: str, project_context: str) -> str:
+    summary = str(summary_md or "").strip()
+    context = str(project_context or "").strip()
+    if not summary or not context:
+        return summary
+
+    low = summary.lower()
+    tokens: list[str] = []
+
+    proj_match = re.search(r"Active coding project:\s*(.+)", context)
+    if proj_match:
+        tokens.append(str(proj_match.group(1)).strip().lower())
+
+    stack_match = re.search(r"Stack:\s*(\{.+\})", context)
+    if stack_match:
+        raw = str(stack_match.group(1)).strip()
+        try:
+            stack = json.loads(raw)
+        except Exception:
+            stack = {}
+        if isinstance(stack, dict):
+            for value in stack.values():
+                text = str(value or "").strip().lower()
+                if text and text not in {"none", "null"}:
+                    tokens.append(text)
+
+    workspace_match = re.search(r"Workspace:\s*(.+)", context)
+    if workspace_match:
+        workspace = str(workspace_match.group(1)).strip().lower()
+        if workspace:
+            tokens.append(workspace.split("/")[-1])
+
+    tokens = [t for t in tokens if t]
+    if tokens and any(t in low for t in tokens):
+        return summary
+
+    anchor_lines = ["## Project Context Anchors"]
+    for line in context.splitlines():
+        line = str(line).strip()
+        if line:
+            anchor_lines.append(f"- {line}")
+    return f"{summary}\n\n" + "\n".join(anchor_lines)
+
+
+def enforce_final_summary_contract(
+    *,
+    summary_md: str,
+    findings: list[dict[str, Any]] | None,
+    source_quality_warning: str = "",
+    analogy_sources: list[str] | None = None,
+) -> str:
+    summary = str(summary_md or "").strip()
+    if not summary:
+        return summary
+
+    sections: list[str] = []
+
+    # Evidence/Inference/Speculation/Analogy buckets.
+    evidence_bullets = _extract_bullets("\n".join([ln for ln in summary.splitlines() if "[E]" in ln]))
+    inference_bullets = _extract_bullets("\n".join([ln for ln in summary.splitlines() if "[I]" in ln]))
+    speculation_bullets = _extract_bullets("\n".join([ln for ln in summary.splitlines() if "[S]" in ln]))
+    analogy_bullets = _extract_bullets("\n".join([ln for ln in summary.splitlines() if "[A]" in ln]))
+
+    if not re.search(r"^##\s+Evidence\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        sections.extend(
+            [
+                "## Evidence / Inference / Speculation Buckets",
+                "### Evidence [E]",
+                *(f"- {row}" for row in (evidence_bullets or ["No explicit [E] bucket lines extracted."])),
+                "### Inference [I]",
+                *(f"- {row}" for row in (inference_bullets or ["No explicit [I] bucket lines extracted."])),
+                "### Speculation [S]",
+                *(f"- {row}" for row in (speculation_bullets or ["No explicit [S] bucket lines extracted."])),
+                "### Analogies [A]",
+                *(f"- {row}" for row in (analogy_bullets or ["No explicit [A] bucket lines extracted."])),
+            ]
+        )
+
+    if not re.search(r"^##\s+Recommended\s+Actions\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        next_steps = _extract_bullets(
+            "\n".join([ln for ln in summary.splitlines() if re.search(r"next steps", ln, re.IGNORECASE)])
+        )
+        sections.append("## Recommended Actions")
+        if next_steps:
+            sections.extend([f"- {row}" for row in next_steps])
+        else:
+            sections.append("- Convert the highest-confidence findings into an execution checklist for this project.")
+
+    if not re.search(r"^##\s+Risks\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        sections.extend(
+            [
+                "## Risks",
+                "- Evidence gaps and low-tier sources should gate irreversible decisions.",
+                "- Treat cross-domain analogies as inspiration, not proof.",
+            ]
+        )
+
+    if not re.search(r"^##\s+Source\s+Quality\s+Notes\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        sections.append("## Source Quality Notes")
+        if str(source_quality_warning or "").strip():
+            sections.append(f"- {str(source_quality_warning).strip()}")
+        else:
+            sections.append("- Confidence should be read with source-tier weighting and coverage gaps.")
+
+    if not re.search(r"^##\s+Rejected\s*/?\s*Weak\s+Sources\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        weak_agents: list[str] = []
+        for row in findings or []:
+            if not isinstance(row, dict):
+                continue
+            confidence = row.get("confidence")
+            try:
+                score = int(confidence)
+            except Exception:
+                score = 0
+            if score > 0 and score <= 2:
+                weak_agents.append(str(row.get("agent", "agent")))
+        sections.append("## Rejected/Weak Sources")
+        if weak_agents:
+            for name in sorted(set(weak_agents)):
+                sections.append(f"- Weak support from {name}; excluded from final recommendations.")
+        else:
+            sections.append("- No explicit weak-source exclusions were recorded in this run.")
+
+    if analogy_sources and not re.search(r"^##\s+Design\s+Inspiration\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        sections.append("## Design Inspiration (analogies - non-evidence)")
+        for url in analogy_sources[:8]:
+            sections.append(f"- [A] {url}")
+
+    if not sections:
+        return summary
+    return f"{summary}\n\n" + "\n".join(sections)
+
+
+__all__ = [
+    "CHAIN_STAGES",
+    "enforce_final_summary_contract",
+    "ensure_project_specificity",
+    "run_translation_chain",
+]

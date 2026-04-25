@@ -986,6 +986,7 @@ class FoxforgeOrchestrator:
         progress_callback=None,
         details_sink: dict[str, Any] | None = None,
         cancel_checker=None,
+        disable_web: bool = False,
     ) -> str:
         cfg = self._reynard_layer_config()
         model = cfg.get("model", "")
@@ -1089,14 +1090,14 @@ class FoxforgeOrchestrator:
             if self._is_recency_sensitive_from_history(prior_messages):
                 recency_sensitive = True
         live_query_text = self._contextual_live_query(text, prior_messages)
-        must_verify_live = self._requires_live_verification(live_query_text, web_topic_type)
+        must_verify_live = False if disable_web else self._requires_live_verification(live_query_text, web_topic_type)
         if must_verify_live:
             recency_sensitive = True
         # Context gate: for keyword-triggered (non-forced) web paths, verify the routing
         # makes sense given the full conversation — suppresses false positives like "source"
         # used to mean "source of the problem" rather than "fetch web sources".
-        _web_gate_cleared = True
-        if not must_verify_live and self._should_offer_web(text, "project"):
+        _web_gate_cleared = not disable_web
+        if not disable_web and not must_verify_live and self._should_offer_web(text, "project"):
             _trigger_reason = (
                 "recency_sensitive" if recency_sensitive
                 else "evolving_topic" if evolving_topic

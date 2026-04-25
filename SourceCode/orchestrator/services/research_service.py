@@ -3,9 +3,17 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
+from agents_research.persona_router import (
+    PERSONAS,
+    build_project_context_block,
+    generate_persona_queries,
+)
+from agents_research.source_diversity import rank_bucket_sources
 from agents_research.citation_linker import build_retrieved_chunks, link as link_citations
 from agents_research.deep_researcher import (
     _build_source_quality_footer,
@@ -154,7 +162,13 @@ class ResearchService:
                 _active_foraging.add(slug)
         try:
             self._emit_web_start(progress_callback, lane="project")
-            web_note, web_context, web_details = host._prepare_web_context(text=text, lane="project", topic_type=topic_type, force=True, progress_callback=progress_callback)
+            web_note, web_context, web_details, project_context = self._prepare_persona_discovery_web_context(
+                host,
+                text=text,
+                lane="project",
+                topic_type=topic_type,
+                progress_callback=progress_callback,
+            )
             self._emit_web_progress(progress_callback, web_details)
             out = self._run_research_pool(
                 text=text,
@@ -162,6 +176,7 @@ class ResearchService:
                 history=history,
                 topic_type=topic_type,
                 web_context=web_context,
+                project_context=project_context,
                 cancel_checker=cancel_checker,
                 pause_checker=pause_checker,
                 yield_checker=yield_checker,
@@ -324,7 +339,13 @@ class ResearchService:
         details_sink: dict[str, Any] | None = None,
     ) -> str:
         self._emit_web_start(progress_callback, lane=lane)
-        web_note, web_context, web_details = host._prepare_web_context(text=text, lane=lane, topic_type=topic_type, force=True, progress_callback=progress_callback)
+        web_note, web_context, web_details, project_context = self._prepare_persona_discovery_web_context(
+            host,
+            text=text,
+            lane=lane,
+            topic_type=topic_type,
+            progress_callback=progress_callback,
+        )
         self._emit_web_progress(progress_callback, web_details)
         out = self._run_research_pool(
             text=text,
@@ -332,6 +353,7 @@ class ResearchService:
             history=history,
             topic_type=topic_type,
             web_context=web_context,
+            project_context=project_context,
             cancel_checker=cancel_checker,
             pause_checker=pause_checker,
             yield_checker=yield_checker,
@@ -376,6 +398,184 @@ class ResearchService:
             details_sink=details_sink,
         )
 
+    def _prepare_persona_discovery_web_context(
+        self,
+        host: Any,
+        *,
+        text: str,
+        lane: str,
+        topic_type: str,
+        progress_callback=None,
+    ) -> tuple[str, str, dict[str, Any], str]:
+        lane_key = str(lane or "research").strip().lower() or "research"
+        project_slug = str(getattr(host, "project_slug", "") or "").strip() or "general"
+        project_context = build_project_context_block(self.repo_root, project_slug)
+        planner_client = InferenceRouter(self.repo_root)
+
+        try:
+            persona_queries = generate_persona_queries(
+                question=text,
+                project_context=project_context,
+                client=planner_client,
+                repo_root=self.repo_root,
+            )
+        except Exception:
+            persona_queries = []
+        if not persona_queries:
+            # Hard fallback to legacy single-query path.
+            web_note, web_context, web_details = host._prepare_web_context(
+                text=text,
+                lane=lane_key,
+                topic_type=topic_type,
+                force=True,
+                progress_callback=progress_callback,
+            )
+            return web_note, web_context, web_details, project_context
+
+        if callable(progress_callback):
+            try:
+                progress_callback(
+                    "persona_queries_planned",
+                    {
+                        "queries": [
+                            {"persona": str(row.get("label", "")), "query": str(row.get("query", ""))}
+                            for row in persona_queries
+                        ],
+                        "count": len(persona_queries),
+                    },
+                )
+            except Exception:
+                pass
+
+        def _crawl_one(row: dict[str, str]) -> dict[str, Any]:
+            pid = str(row.get("id", "")).strip()
+            label = str(row.get("label", pid)).strip() or pid
+            query = str(row.get("query", text)).strip() or str(text)
+            request_id = f"persona_{pid}_{int(time.time() * 1000)}"
+            reason = f"Persona discovery crawl ({label}) for project-specific research diversity."
+            if hasattr(host, "web_engine"):
+                result = host.web_engine.run_query(
+                    project=project_slug,
+                    lane=lane_key,
+                    query=query,
+                    reason=reason,
+                    request_id=request_id,
+                    note=f"persona_discovery:{pid}",
+                    topic_type=topic_type,
+                    progress_callback=progress_callback,
+                )
+                return {
+                    "id": pid,
+                    "label": label,
+                    "query": query,
+                    "result": result if isinstance(result, dict) else {},
+                }
+            # If host has no web_engine, degrade to orchestrator helper.
+            _note, _ctx, details = host._prepare_web_context(
+                text=query,
+                lane=lane_key,
+                topic_type=topic_type,
+                force=True,
+                progress_callback=progress_callback,
+            )
+            _ = (_note, _ctx)
+            return {
+                "id": pid,
+                "label": label,
+                "query": query,
+                "result": details if isinstance(details, dict) else {},
+            }
+
+        crawls: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=min(4, max(1, len(persona_queries)))) as executor:
+            futures = [executor.submit(_crawl_one, row) for row in persona_queries]
+            for future in as_completed(futures):
+                try:
+                    crawls.append(future.result())
+                except Exception as exc:
+                    LOGGER.warning("persona crawl failed: %s", exc)
+
+        crawls_by_id = {str(row.get("id", "")): row for row in crawls if isinstance(row, dict)}
+        ordered_crawls = [crawls_by_id.get(str(p.get("id", ""))) for p in persona_queries]
+        ordered_crawls = [row for row in ordered_crawls if isinstance(row, dict)]
+
+        selected_sources: list[dict[str, Any]] = []
+        tier_counts = {"tier1": 0, "tier2": 0, "tier3": 0, "tier4": 0}
+        for crawl in ordered_crawls:
+            query = str(crawl.get("query", "")).strip()
+            label = str(crawl.get("label", "")).strip()
+            details = crawl.get("result", {}) if isinstance(crawl.get("result", {}), dict) else {}
+            raw_sources = [
+                dict(row) for row in (details.get("sources") or []) if isinstance(row, dict)
+            ][:20]
+            ranked = rank_bucket_sources(
+                persona_query=query,
+                sources=raw_sources,
+                top_k=8,
+                client=planner_client,
+                embedding_model="qwen3-embedding:4b",
+            )
+            for row in ranked:
+                source_row = dict(row)
+                source_row["originating_persona"] = label
+                selected_sources.append(source_row)
+                tier = str(source_row.get("source_tier", "tier3")).strip().lower() or "tier3"
+                if tier not in tier_counts:
+                    tier = "tier3"
+                tier_counts[tier] += 1
+
+        if not selected_sources:
+            web_note, web_context, web_details = host._prepare_web_context(
+                text=text,
+                lane=lane_key,
+                topic_type=topic_type,
+                force=True,
+                progress_callback=progress_callback,
+            )
+            return web_note, web_context, web_details, project_context
+
+        lines = ["Recent web source cache (use only if relevant):"]
+        for row in selected_sources:
+            title = str(row.get("title", "")).strip() or str(row.get("url", "")).strip()
+            url = str(row.get("url", "")).strip()
+            if not url:
+                continue
+            snippet = str(row.get("snippet", "")).strip()
+            tier = str(row.get("source_tier", "tier3")).strip().lower() or "tier3"
+            score = float(row.get("source_score", row.get("diversity_score", 0.0)) or 0.0)
+            fresh = float(row.get("freshness_score", 0.0) or 0.0)
+            persona = str(row.get("originating_persona", "")).strip()
+            analogy_flag = bool(row.get("analogy", False))
+            if analogy_flag and tier != "tier4":
+                tier = "tier4"
+            note = f"persona={persona}"
+            if analogy_flag:
+                note += " [A]"
+            lines.append(f"- [{tier} {score:.2f} fresh={fresh:.2f} {note}] {title} | {url}")
+            if snippet:
+                lines.append(f"  snippet: {snippet}")
+        web_context = "\n".join(lines)
+
+        web_note = (
+            "Persona-driven discovery complete: 4 query lenses, "
+            f"{len(selected_sources)} curated sources."
+        )
+        web_details = {
+            "mode": "persona_discovery",
+            "requested": True,
+            "source_count": len(selected_sources),
+            "seed_count": sum(int((row.get("result", {}) or {}).get("seed_count", 0) or 0) for row in ordered_crawls),
+            "crawl_pages": sum(int((row.get("result", {}) or {}).get("crawl_pages", 0) or 0) for row in ordered_crawls),
+            "crawl_gated_links": sum(int((row.get("result", {}) or {}).get("crawl_gated_links", 0) or 0) for row in ordered_crawls),
+            "query_variants_count": len(persona_queries),
+            "source_scoring_summary": {
+                "tier_counts": tier_counts,
+            },
+            "sources": selected_sources,
+            "persona_queries": persona_queries,
+        }
+        return web_note, web_context, web_details, project_context
+
     def _run_research_pool(
         self,
         *,
@@ -384,6 +584,7 @@ class ResearchService:
         history: list[dict[str, str]] | None,
         topic_type: str,
         web_context: str,
+        project_context: str = "",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -399,6 +600,7 @@ class ResearchService:
                     context={
                         "web_context": web_context,
                         "topic_type": topic_type,
+                        "project_context": project_context,
                     },
                     cancel_checker=cancel_checker,
                     pause_checker=pause_checker,
@@ -419,6 +621,7 @@ class ResearchService:
                 yield_checker=yield_checker,
                 progress_callback=progress_callback,
                 topic_type=topic_type,
+                project_context=project_context,
             )
         raise RuntimeError("No research pool executor is available.")
 
@@ -607,6 +810,12 @@ class ResearchService:
 
         project_slug = str(getattr(host, "project_slug", "") or "").strip()
         prior_open_questions = _load_prior_open_questions(self.repo_root, project_slug)
+        gap_source_evidence = _extract_web_source_evidence(web_context)
+        gap_source_tier_map = {
+            str(row.get("url", "")).strip().rstrip("/,."): str(row.get("source_tier", "")).strip().lower()
+            for row in gap_source_evidence
+            if isinstance(row, dict) and str(row.get("url", "")).strip()
+        }
         try:
             new_summary_md = synthesize(
                 text,
@@ -615,6 +824,7 @@ class ResearchService:
                 model_cfg=synth_cfg,
                 prior_synthesis=summary_md,
                 prior_open_questions=prior_open_questions,
+                source_tier_map=gap_source_tier_map,
             )
         except SynthesisUnavailableError as exc:
             LOGGER.error("Synthesis unavailable during gap-fill pass: %s", exc)
