@@ -32,6 +32,26 @@ PERSONAS: list[dict[str, str]] = [
     },
 ]
 
+# Domain forage personas — focus on what to build (subject matter, user reality, resources)
+# rather than how to build it (implementation, architecture, delivery).
+DOMAIN_PERSONAS: list[dict[str, str]] = [
+    {
+        "id": "practitioner",
+        "label": "Domain Practitioner",
+        "query_lens": "real-world expert knowledge, professional validated methods, what specialists in this field actually do and teach",
+    },
+    {
+        "id": "end_user",
+        "label": "End User Researcher",
+        "query_lens": "learner motivations, friction points, why people succeed or quit, what users actually need vs what they say they need",
+    },
+    {
+        "id": "resource_scout",
+        "label": "Resource Scout",
+        "query_lens": "authoritative domain curricula, reference materials, established standards and certifications, trusted content creators in this space",
+    },
+]
+
 
 def build_project_context_block(repo_root: Path, project_slug: str) -> str:
     slug = str(project_slug or "").strip() or "general"
@@ -56,10 +76,14 @@ def build_project_context_block(repo_root: Path, project_slug: str) -> str:
     return "\n".join(lines)
 
 
-def _fallback_queries(question: str) -> list[dict[str, str]]:
+def _active_personas(forage_profile: str) -> list[dict[str, str]]:
+    return DOMAIN_PERSONAS if str(forage_profile or "").strip().lower() == "domain" else PERSONAS
+
+
+def _fallback_queries(question: str, forage_profile: str = "technical") -> list[dict[str, str]]:
     base = " ".join(str(question or "").strip().split())
     out: list[dict[str, str]] = []
-    for row in PERSONAS:
+    for row in _active_personas(forage_profile):
         lens = str(row.get("query_lens", "")).strip()
         out.append(
             {
@@ -134,17 +158,19 @@ def generate_persona_queries(
     project_context: str,
     client: Any,
     repo_root: Path,
+    forage_profile: str = "technical",
 ) -> list[dict[str, str]]:
     cfg = lane_model_config(repo_root, "intent_confirmer") or {}
     model = str(cfg.get("model", "gemma3:4b")).strip() or "gemma3:4b"
     fallback = cfg.get("fallback_models", ["qwen3:4b"]) if isinstance(cfg.get("fallback_models", []), list) else ["qwen3:4b"]
 
+    personas = _active_personas(forage_profile)
     persona_lines = "\n".join(
-        f"- {row['id']}: {row['label']} | lens={row['query_lens']}" for row in PERSONAS
+        f"- {row['id']}: {row['label']} | lens={row['query_lens']}" for row in personas
     )
     system_prompt = (
         "Generate exactly one high-quality web search query for each persona. "
-        "Return ONLY JSON with shape: {\"queries\":[{\"id\":\"pm\",\"query\":\"...\"}, ...]}."
+        "Return ONLY JSON with shape: {\"queries\":[{\"id\":\"...\",\"query\":\"...\"}, ...]}."
     )
     user_prompt = (
         f"Research request:\n{str(question or '').strip()}\n\n"
@@ -174,20 +200,20 @@ def generate_persona_queries(
             tier="default",
         )
     except Exception:
-        return _fallback_queries(question)
+        return _fallback_queries(question, forage_profile)
 
     parsed = _parse_query_payload(str(raw or ""))
-    if len(parsed) == len(PERSONAS):
+    if len(parsed) == len(personas):
         return parsed
 
     # Merge whatever parsed with deterministic fallbacks.
-    fallback_rows = {row["id"]: row for row in _fallback_queries(question)}
+    fallback_rows = {row["id"]: row for row in _fallback_queries(question, forage_profile)}
     parsed_rows = {row["id"]: row for row in parsed}
     merged: list[dict[str, str]] = []
-    for persona in PERSONAS:
+    for persona in personas:
         pid = str(persona["id"])
         merged.append(parsed_rows.get(pid) or fallback_rows[pid])
     return merged
 
 
-__all__ = ["PERSONAS", "build_project_context_block", "generate_persona_queries"]
+__all__ = ["PERSONAS", "DOMAIN_PERSONAS", "build_project_context_block", "generate_persona_queries"]

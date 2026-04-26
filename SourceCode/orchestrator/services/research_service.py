@@ -91,6 +91,7 @@ class ResearchService:
         topic_type: str,
         turn_plan: Any,
         force_research: bool,
+        forage_profile: str = "technical",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -123,6 +124,7 @@ class ResearchService:
             lane=lane,
             history=history,
             topic_type=topic_type,
+            forage_profile=forage_profile,
             cancel_checker=cancel_checker,
             pause_checker=pause_checker,
             yield_checker=yield_checker,
@@ -285,6 +287,7 @@ class ResearchService:
         lane: str,
         history: list[dict[str, str]] | None,
         topic_type: str,
+        forage_profile: str = "technical",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -309,6 +312,7 @@ class ResearchService:
                 lane=lane,
                 history=history,
                 topic_type=topic_type,
+                forage_profile=forage_profile,
                 cancel_checker=cancel_checker,
                 pause_checker=pause_checker,
                 yield_checker=yield_checker,
@@ -330,6 +334,7 @@ class ResearchService:
         lane: str,
         history: list[dict[str, str]] | None,
         topic_type: str,
+        forage_profile: str = "technical",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -344,6 +349,7 @@ class ResearchService:
             text=text,
             lane=lane,
             topic_type=topic_type,
+            forage_profile=forage_profile,
             progress_callback=progress_callback,
         )
         self._emit_web_progress(progress_callback, web_details)
@@ -354,6 +360,7 @@ class ResearchService:
             topic_type=topic_type,
             web_context=web_context,
             project_context=project_context,
+            forage_profile=forage_profile,
             cancel_checker=cancel_checker,
             pause_checker=pause_checker,
             yield_checker=yield_checker,
@@ -405,6 +412,7 @@ class ResearchService:
         text: str,
         lane: str,
         topic_type: str,
+        forage_profile: str = "technical",
         progress_callback=None,
     ) -> tuple[str, str, dict[str, Any], str]:
         lane_key = str(lane or "research").strip().lower() or "research"
@@ -418,6 +426,7 @@ class ResearchService:
                 project_context=project_context,
                 client=planner_client,
                 repo_root=self.repo_root,
+                forage_profile=forage_profile,
             )
         except Exception:
             persona_queries = []
@@ -585,6 +594,7 @@ class ResearchService:
         topic_type: str,
         web_context: str,
         project_context: str = "",
+        forage_profile: str = "technical",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -601,6 +611,7 @@ class ResearchService:
                         "web_context": web_context,
                         "topic_type": topic_type,
                         "project_context": project_context,
+                        "forage_profile": forage_profile,
                     },
                     cancel_checker=cancel_checker,
                     pause_checker=pause_checker,
@@ -622,6 +633,7 @@ class ResearchService:
                 progress_callback=progress_callback,
                 topic_type=topic_type,
                 project_context=project_context,
+                forage_profile=forage_profile,
             )
         raise RuntimeError("No research pool executor is available.")
 

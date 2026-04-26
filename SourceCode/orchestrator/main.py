@@ -3229,6 +3229,7 @@ class FoxforgeOrchestrator:
         seed_artifact_text: str = "",
         force_research: bool = False,
         force_make: bool = False,
+        forage_profile: str = "technical",
         thread_id: str = "",
         details_sink: dict[str, Any] | None = None,
     ) -> str:
@@ -3487,6 +3488,7 @@ class FoxforgeOrchestrator:
                 topic_type=topic_type,
                 turn_plan=turn_plan,
                 force_research=force_research,
+                forage_profile=forage_profile,
                 cancel_checker=cancel_checker,
                 pause_checker=pause_checker,
                 yield_checker=yield_checker,

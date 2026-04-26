@@ -360,9 +360,15 @@ class CommandDispatcher:
         return CommandOutcome(reply, active_project_slug=state.active_project_slug)
 
     def _cmd_forage(self, args: list[str], state: DispatcherState, progress_fn=None) -> CommandOutcome:
-        prompt = " ".join(args).strip()
+        domain_mode = "--domain" in args
+        clean_args = [a for a in args if a != "--domain"]
+        prompt = " ".join(clean_args).strip()
         if not prompt:
-            return CommandOutcome("Usage: /forage <query>", error=True, active_project_slug=state.active_project_slug)
+            return CommandOutcome(
+                "Usage: /forage <query>  |  /forage --domain <query>",
+                error=True,
+                active_project_slug=state.active_project_slug,
+            )
         project = state.active_project_slug or "general"
         orch = FoxforgeOrchestrator(self.repo_root)
         orch.set_project(project)
@@ -392,7 +398,8 @@ class CommandDispatcher:
                 extra = f": {detail.strip()[:100]}"
             progress_fn(f"{label}{extra}")
 
-        out = orch.handle_message(prompt, force_research=True, progress_callback=_progress)
+        forage_profile = "domain" if domain_mode else "technical"
+        out = orch.handle_message(prompt, force_research=True, forage_profile=forage_profile, progress_callback=_progress)
         return CommandOutcome(str(out or "Research completed."), active_project_slug=state.active_project_slug)
 
     def _cmd_view(self, args: list[str], state: DispatcherState) -> CommandOutcome:

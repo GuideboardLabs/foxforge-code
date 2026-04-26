@@ -28,7 +28,7 @@ class ThinkingIndicator(Widget):
         super().__init__(id="thinking-indicator")
         self._timer: Timer | None = None
         self._active = False
-        self._task = "msg"
+        self._task_type = "msg"
         self._label = "thinking"
         self._dots = 0
         self._started_at: float = 0.0
@@ -60,7 +60,7 @@ class ThinkingIndicator(Widget):
 
     def start(self, label: str = "", task: str = "msg") -> None:
         self._active = True
-        self._task = task
+        self._task_type = task
         self._phrase_idx = 0
         self._started_at = time.monotonic()
         self._next_phrase_at = self._started_at + random.randint(PHRASE_INTERVAL_MIN, PHRASE_INTERVAL_MAX)
@@ -87,7 +87,7 @@ class ThinkingIndicator(Widget):
         self._dots = (self._dots + 1) % 4
         now = time.monotonic()
         if now >= self._next_phrase_at:
-            phrases = TASK_PHRASES.get(self._task, MSG_PHRASES)
+            phrases = TASK_PHRASES.get(self._task_type, MSG_PHRASES)
             self._phrase_idx = (self._phrase_idx + 1) % len(phrases)
             self._label = phrases[self._phrase_idx]
             self._next_phrase_at = now + random.randint(PHRASE_INTERVAL_MIN, PHRASE_INTERVAL_MAX)

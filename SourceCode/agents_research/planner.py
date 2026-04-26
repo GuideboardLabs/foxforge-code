@@ -56,9 +56,9 @@ def _fallback_tree(question: str, personas: list[str], max_leaves: int = 5) -> d
     root_id = "root"
     branch_templates = [
         "What are the most critical confirmed facts and current state related to this question?",
-        "What are the key technical or practical feasibility constraints?",
-        "What are the highest-risk failure modes and uncertainties?",
-        "What are the best concrete execution paths and tradeoffs?",
+        "What does the standard or consensus approach miss? When does it fail in practice for real users?",
+        "What are the highest-risk failure modes, behavioral edge cases, and silent failure loops?",
+        "What non-obvious design or implementation patterns differentiate good solutions from mediocre ones?",
         "What evidence is missing or weak and needs external validation?",
     ]
 

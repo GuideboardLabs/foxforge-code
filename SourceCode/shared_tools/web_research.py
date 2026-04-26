@@ -624,6 +624,23 @@ class WebResearchEngine:
         "apache.org",
         "eclipse.org",
         "mozilla.org",
+
+        # Primary research databases and open-access peer-reviewed journals.
+        # These are authoritative for domain knowledge forages across all subject areas.
+        "pubmed.ncbi.nlm.nih.gov",
+        "ncbi.nlm.nih.gov",
+        "pmc.ncbi.nlm.nih.gov",
+        "nih.gov",
+        "cdc.gov",
+        "who.int",
+        "jstor.org",
+        "plos.org",
+        "journals.plos.org",
+        "nature.com",
+        "science.org",
+        "cell.com",
+        "frontiersin.org",
+        "mdpi.com",
     }
 
     # Tier 2: strong secondary sources for developer work: maintained repos,
@@ -784,6 +801,22 @@ class WebResearchEngine:
         "paperswithcode.com",
         "arxiv.org",
         "semanticscholar.org",
+        "biorxiv.org",
+        "medrxiv.org",
+
+        # Academic aggregators and research paper repositories.
+        # These index or host peer-reviewed work and are reliable across all subject areas.
+        "scholar.google.com",
+        "researchgate.net",
+        "academia.edu",
+        "sciencedirect.com",
+        "springerlink.com",
+        "springer.com",
+        "wiley.com",
+        "tandfonline.com",
+        "sagepub.com",
+        "apa.org",
+        "psychologytoday.com",
 
         # Practical operations, Linux, and hosting guides.
         "redhat.com",
@@ -1022,8 +1055,6 @@ class WebResearchEngine:
         # Generic document/social sharing and consumer wiki/how-to pages.
         "scribd.com",
         "slideshare.net",
-        "academia.edu",
-        "researchgate.net",
         "prezi.com",
         "issuu.com",
         "wikihow.com",
@@ -2672,6 +2703,12 @@ class WebResearchEngine:
             return "tier1", 1.0
         if self._domain_matches(domain, self.TRUST_TIER_2):
             return "tier2", 0.78
+        # TLD auto-elevation: government and university domains are authoritative
+        # across all subject areas, not just the technical domains in the static lists.
+        if domain.endswith(".gov") or domain.endswith(".gov.uk") or domain.endswith(".gov.au"):
+            return "tier1", 0.92
+        if domain.endswith(".edu") or domain.endswith(".ac.uk") or domain.endswith(".edu.au"):
+            return "tier1", 0.88
         if self._domain_matches(domain, self.TRUST_TIER_3):
             return "tier3", 0.52
         return "tier3", 0.45

@@ -501,6 +501,7 @@ ANALYSIS_PROFILE_MATH           = "math_analysis"
 ANALYSIS_PROFILE_POLITICS       = "politics_analysis"
 ANALYSIS_PROFILE_CURRENT_EVENTS = "current_events_analysis"
 ANALYSIS_PROFILE_UNDERGROUND    = "underground_analysis"
+ANALYSIS_PROFILE_DOMAIN         = "domain_analysis"
 STATISTICAL_ANALYSIS_PERSONA = "statistical_analysis"
 STATISTICAL_ANALYSIS_DIRECTIVE = (
     "OUTPUT CONTRACT: Return ONLY quantitative findings from sources. "
@@ -541,6 +542,7 @@ TOPIC_TYPE_TO_PROFILE: dict[str, str] = {
     "current_events": ANALYSIS_PROFILE_CURRENT_EVENTS,
     "general":        ANALYSIS_PROFILE_GENERAL,
     "underground":    ANALYSIS_PROFILE_UNDERGROUND,
+    "domain":         ANALYSIS_PROFILE_DOMAIN,
     "business":       ANALYSIS_PROFILE_FINANCE,
     "law":            ANALYSIS_PROFILE_POLITICS,
     "education":      ANALYSIS_PROFILE_GENERAL,
@@ -934,6 +936,44 @@ def _profile_agent_templates(profile: str) -> list[dict[str, Any]]:
                 "role": "advisory",
             },
         ]
+    if profile == ANALYSIS_PROFILE_DOMAIN:
+        return [
+            {
+                "persona": "practitioner_researcher",
+                "model": "deepseek-r1:8b",
+                "directive": (
+                    "Focus on what domain experts and practitioners actually know, do, and teach — "
+                    "beyond introductory tutorials and beginner resources. Look for validated methods, "
+                    "expert-level distinctions, professional consensus, and what specialists find "
+                    "non-obvious or commonly misunderstood by newcomers. "
+                    "Prioritize practitioner communities, professional standards bodies, "
+                    "expert-authored content, and advanced curricula over beginner-facing material.",
+                ),
+            },
+            {
+                "persona": "end_user_researcher",
+                "model": "qwen3:8b",
+                "directive": (
+                    "Focus on learner and user motivations, real failure patterns, friction points, "
+                    "and what makes users succeed or quit. Look for experience reports, forum discussions, "
+                    "reviews, and candid user accounts. Identify behavioral patterns that predict "
+                    "success vs. failure in this domain. Distinguish what users say they need from "
+                    "what the evidence shows they actually need."
+                ),
+            },
+            {
+                "persona": "resource_scout",
+                "model": "qwen3:8b",
+                "directive": (
+                    "Focus on authoritative domain resources: curricula, certifications, standards bodies, "
+                    "trusted content creators, and reference materials. Identify what is considered the "
+                    "canonical source of truth in this domain. Distinguish between introductory, "
+                    "intermediate, and advanced resources. Flag materials that are outdated, superseded, "
+                    "or considered low-quality by practitioners."
+                ),
+                "role": "advisory",
+            },
+        ]
     # General — broad, non-domain-specific research.
     return [
         {
@@ -1206,7 +1246,7 @@ def _run_one_agent(
     temperature = float(agent_cfg.get("temperature", model_cfg.get("temperature", 0.3)))
     num_ctx = int(agent_cfg.get("num_ctx", model_cfg.get("num_ctx", 16384)))
     think = bool(agent_cfg.get("think", model_cfg.get("think", False)))
-    timeout = int(agent_cfg.get("timeout_sec", model_cfg.get("timeout_sec", 0)))
+    timeout = int(agent_cfg.get("timeout_sec", model_cfg.get("timeout_sec", 300)))
     retry_attempts = int(agent_cfg.get("retry_attempts", model_cfg.get("retry_attempts", 6)))
     retry_backoff_sec = float(agent_cfg.get("retry_backoff_sec", model_cfg.get("retry_backoff_sec", 1.5)))
     validation_cycles = int(agent_cfg.get("validation_cycles", model_cfg.get("validation_cycles", 3)))
@@ -1689,6 +1729,7 @@ def run_research_pool(
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     topic_type: str = "general",
     project_context: str = "",
+    forage_profile: str = "technical",
 ) -> dict:
     bus.emit("research_pool", "start", {"question": question, "project": project_slug})
     _refresh_dynamic_models(repo_root)
@@ -1731,8 +1772,12 @@ def run_research_pool(
     learning = FeedbackLearningEngine(repo_root, client=client, model_cfg=orchestrator_cfg)
     learned_guidance = learning.guidance_for_lane("research", limit=5)
     resolved_type = str(topic_type or "general").strip().lower() or "general"
-    profile_name = _analysis_profile_for_type(resolved_type)
-    agents = _agent_specs(model_cfg, topic_type=resolved_type)
+    if str(forage_profile or "").strip().lower() == "domain":
+        profile_name = ANALYSIS_PROFILE_DOMAIN
+        agents = _agent_specs(model_cfg, topic_type="domain")
+    else:
+        profile_name = _analysis_profile_for_type(resolved_type)
+        agents = _agent_specs(model_cfg, topic_type=resolved_type)
     allowed_personas = {
         str(row.get("persona", "")).strip()
         for row in agents

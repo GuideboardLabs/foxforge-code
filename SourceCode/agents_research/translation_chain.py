@@ -290,6 +290,32 @@ def enforce_final_summary_contract(
             ]
         )
 
+    if not re.search(r"^##\s+Insights?\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        sections.extend(
+            [
+                "## Insights & Design Implications",
+                "- Coverage gap: no non-obvious insights were surfaced in this run.",
+                "- Consider re-running with a more specific forage question targeting edge cases and failure modes.",
+            ]
+        )
+
+    if not re.search(r"^##\s+Failure\s+Modes?\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        sections.extend(
+            [
+                "## Failure Modes & Risks",
+                "- No specific failure modes were identified in this run.",
+                "- Treat consensus-only findings as untested until at least one failure scenario is documented.",
+            ]
+        )
+
+    if not re.search(r"^##\s+Differentiation\b", summary, flags=re.IGNORECASE | re.MULTILINE):
+        sections.extend(
+            [
+                "## Differentiation Opportunity",
+                "- No differentiation opportunities were identified in this run.",
+            ]
+        )
+
     if not re.search(r"^##\s+Source\s+Quality\s+Notes\b", summary, flags=re.IGNORECASE | re.MULTILINE):
         sections.append("## Source Quality Notes")
         if str(source_quality_warning or "").strip():

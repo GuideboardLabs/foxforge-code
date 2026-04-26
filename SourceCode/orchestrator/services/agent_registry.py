@@ -38,6 +38,7 @@ class ResearchPoolAgent(BaseAgentExecutor):
             progress_callback=task.progress_callback,
             topic_type=str(task.context.get("topic_type", "general") or "general"),
             project_context=str(task.context.get("project_context", "") or ""),
+            forage_profile=str(task.context.get("forage_profile", "technical") or "technical"),
         )
         return WorkerResult.from_legacy("research", result)
 

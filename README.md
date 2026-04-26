@@ -23,7 +23,7 @@
 
 **A local-only terminal coding assistant. No API keys. No cloud. No subscriptions.**
 
-Foxforge-code is a TUI-first fork of [Foxforge](https://github.com/GuideboardLabs/Foxforge) stripped down to coding workflows. It drops the web GUI, the general-purpose conversation layer, and the domain-specific research profiles — and replaces them with a direct coding assistant (Fox), a grounded web research pipeline (DeepFox), and a project workspace that tracks everything locally.
+Foxforge-code is a TUI-first fork of [Foxforge](https://github.com/GuideboardLabs/Foxforge) stripped down to coding workflows. It drops the web GUI and the general-purpose conversation layer, and replaces them with a direct coding assistant (Fox), a grounded web research pipeline (DeepFox), and a project workspace that tracks everything locally.
 
 ---
 
@@ -52,20 +52,54 @@ Fox does not search the web. If it doesn't have enough to answer, it says so and
 
 ### DeepFox — the research layer
 
-`/forage` runs the full research pipeline under the hood. DeepFox is the orchestration layer — no personality, no editorializing, no injecting its own ideas into summaries. It reports what the evidence shows, flags gaps, and stops.
+`/forage` and `/forage --domain` run the full research pipeline under the hood. DeepFox is the orchestration layer — no personality, no editorializing, no injecting its own ideas into summaries. It reports what the evidence shows, flags gaps, and stops.
 
-The pipeline:
+Both modes share the same pipeline skeleton. What differs is the _lens_ at each stage.
+
+#### Technical mode — `/forage <query>` (default)
+
+Use this when you want to understand how to build something: architectural tradeoffs, implementation patterns, libraries, risk, ecosystem maturity.
+
 1. **Persona-driven discovery** — 4 roles (Product Manager, Market Analyst, Project Manager, Tech Lead) each generate one search query based on the project context and research question. 4 parallel web crawls × 20 results each = 80 candidate sources.
 2. **Diversity filtering** — each persona bucket is ranked by source tier × topical relevance × intra-bucket diversity. Top 8 per persona = 32 curated sources fed to the research pool.
-3. **Research pool** — 4 parallel agents work the 32 sources: market analyst, technical researcher, risk researcher, execution planner.
-4. **Synthesis** — a single unified narrative with [E] (evidence), [I] (inference), [S] (speculation) labels and tier-aware confidence.
-5. **Skeptic pass** — adversarial critique of the synthesis before it's written to disk.
-6. **Gap-fill** (if needed) — if agent confidence is low, 2 targeted agents run again on identified gaps and the synthesis is rebuilt.
+3. **Research pool** — 4 parallel agents work the sources:
+   - `technical_architecture_researcher` — system design patterns, architectural tradeoffs, scalability
+   - `technical_implementation_researcher` — libraries, APIs, version specifics, gotchas
+   - `technical_risk_researcher` — security, failure modes, performance bottlenecks, tech debt
+   - `technical_market_analyst` (advisory) — ecosystem maturity, adoption trends, competitive alternatives
+4. **Synthesis** → **Skeptic pass** → **Gap-fill** (if confidence is low)
 
-Source tiers used throughout:
-- **Tier 1** — official docs, language references, package registries, standards bodies, security advisories
-- **Tier 2** — maintained repos, Stack Overflow, engineering blogs, established technical publishers
-- **Tier 3** — community forums, tutorial sites, dev blogs, Medium posts
+#### Domain mode — `/forage --domain <query>`
+
+Use this when you want to understand a subject area itself: what experts actually know, what users actually experience, and what authoritative resources define the field. This is the right mode for product research, content strategy, learning path design, or any question about a domain rather than an implementation.
+
+The logic behind the split: technical sources (Stack Overflow, GitHub, engineering blogs) are noise for domain questions, and domain sources (practitioner communities, certification bodies, user forums) are noise for implementation questions. Sending the wrong agents at the wrong sources produces confident-sounding synthesis with the wrong signal.
+
+1. **Persona-driven discovery** — 3 domain-specific roles generate queries oriented toward expert knowledge, user experience, and authoritative references rather than implementation.
+2. **Diversity filtering** — same ranking as technical mode, but source tier calibration favors domain authorities over technical publishers.
+3. **Research pool** — 3 parallel agents:
+   - `practitioner_researcher` (deepseek-r1, thinking on) — what domain experts and practitioners actually know and do, beyond introductory tutorials; professional consensus, expert-level distinctions, non-obvious nuances
+   - `end_user_researcher` — real user motivations, failure patterns, friction points, behavioral predictors of success vs. dropout; what users say vs. what evidence shows they need
+   - `resource_scout` (advisory) — authoritative curricula, certifications, standards bodies, canonical reference materials; distinguishes introductory from advanced, flags outdated material
+4. **Synthesis** → **Skeptic pass** → **Gap-fill** (if confidence is low)
+
+#### Synthesis output (both modes)
+
+The synthesizer produces a unified narrative — not a per-agent summary. Key findings are tagged:
+- `[baseline]` — well-known consensus; compressed to one sentence
+- `[insight]` — non-obvious, differentiating finding; given full treatment
+- `[risk]` — specific failure mode or when-it-breaks scenario; given full treatment
+- `[gap]` — no primary evidence found; stated explicitly
+
+Required sections: **Executive Summary**, **Key Findings**, **Insights & Design Implications** (≥2 non-obvious items), **Failure Modes & Risks** (≥2 specific scenarios), **Differentiation Opportunity**, **Next Steps**.
+
+Evidence labels: `[E]` (evidence — cite a source URL), `[I]` (inference), `[S]` (speculation). Convergence is reported as "N of M agents supported X" — when all agents cite the same source type, that's flagged as an echo, not independent validation.
+
+#### Source tiers (both modes)
+
+- **Tier 1** — official docs, language references, package registries, standards bodies, security advisories, technical specifications
+- **Tier 2** — maintained repos, Stack Overflow, engineering blogs, established technical publishers, reputable practitioner communities
+- **Tier 3** — community forums, tutorial sites, dev blogs, Medium posts, Reddit threads
 - **Tier 4** — cross-domain analogy sources; cannot support evidence claims
 
 If most sources are tier 3/4, synthesis confidence is capped and a Source Quality Warning is added.
@@ -102,7 +136,8 @@ The interface is built with [Textual](https://textual.textualize.io/). Key featu
 | Command | What it does |
 |---|---|
 | `/msg <text>` | Chat with Fox about the active project. No web access. |
-| `/forage <query>` | Run the full web research pipeline. Progress streams to the TUI. |
+| `/forage <query>` | Run the full research pipeline — technical mode. Targets implementation, architecture, and ecosystem questions. |
+| `/forage --domain <query>` | Run the full research pipeline — domain mode. Targets expert knowledge, user experience, and authoritative resources rather than implementation. |
 | `/plan [prompt]` | Generate a markdown plan for the project. |
 | `/execute --plan <id\|latest>` | Run a plan. |
 | `/build [prompt]` | Plan + execute in one shot. |

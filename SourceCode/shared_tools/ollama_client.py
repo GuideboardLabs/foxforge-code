@@ -32,10 +32,12 @@ class OllamaClient:
             method="POST",
         )
         try:
-            if timeout is None or float(timeout) <= 0:
+            if timeout is None:
                 resp_ctx = urllib.request.urlopen(req)
             else:
-                resp_ctx = urllib.request.urlopen(req, timeout=float(timeout))
+                # timeout=0 means "caller didn't set one" — use 300s safe fallback rather than no timeout
+                effective = float(timeout) if float(timeout) > 0 else 300.0
+                resp_ctx = urllib.request.urlopen(req, timeout=effective)
             with resp_ctx as resp:
                 data = resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:

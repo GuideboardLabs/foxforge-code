@@ -16,6 +16,7 @@ _COMMANDS = [
     "/build",
     "/execute --plan latest",
     "/forage ",
+    "/forage --domain ",
     "/git commit",
     "/git init",
     "/git push",
