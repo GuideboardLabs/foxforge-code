@@ -1334,7 +1334,7 @@ class WebResearchEngine:
                         "crawl_max_pages": 18,
                         "crawl_links_per_page": 8,
                         "crawl_deep_follow_seeds": 3,
-                        "crawl_timeout_sec": 0,
+                        "crawl_timeout_sec": 12,
                         "crawl4ai_enabled": True,
                         "crawl4ai_base_url": "http://127.0.0.1:11235",
                         "crawl4ai_timeout_sec": 40,
@@ -1534,9 +1534,9 @@ class WebResearchEngine:
         data["crawl_deep_follow_seeds"] = max(0, min(crawl_deep_follow_seeds, 10))
 
         try:
-            crawl_timeout_sec = int(data.get("crawl_timeout_sec", 0))
+            crawl_timeout_sec = int(data.get("crawl_timeout_sec", 12))
         except (TypeError, ValueError):
-            crawl_timeout_sec = 0
+            crawl_timeout_sec = 12
         data["crawl_timeout_sec"] = max(0, min(crawl_timeout_sec, 180))
 
         data["crawl4ai_enabled"] = _bool_setting("crawl4ai_enabled", True)
@@ -1659,9 +1659,8 @@ class WebResearchEngine:
                 })
                 opener = urllib.request.build_opener(proxy_handler)
                 return opener.open(req, timeout=max(timeout, 1))
-        if timeout <= 0:
-            return urllib.request.urlopen(req)
-        return urllib.request.urlopen(req, timeout=timeout)
+        effective = timeout if timeout > 0 else 20
+        return urllib.request.urlopen(req, timeout=effective)
 
     def get_mode(self) -> str:
         with self.lock:
