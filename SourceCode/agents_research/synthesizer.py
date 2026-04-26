@@ -358,6 +358,12 @@ def synthesize(
                 "All cited support is community/blog/forum level (tier3/tier4). "
                 "Confidence is capped — no official documentation or established technical sources corroborate these findings."
             )
+        elif tier3 > 0 and (tier3 / max(1, total_citations)) > 0.55 and (tier12 / max(1, total_citations)) < 0.30:
+            tier_cap_label = "mixed"
+            source_quality_warning = (
+                "Most cited sources are blog or community level (tier3); primary sources are present but not dominant. "
+                "Confidence is capped at Mixed — treat conclusions as informed best-practice rather than validated findings."
+            )
 
     def _postprocess_output(text: str) -> str:
         out = _sanitize_markdown_urls(_ensure_inline_source_links(text, findings))
@@ -425,6 +431,11 @@ def synthesize(
         "The Differentiation Opportunity section MUST contain at least 1 concrete way to do this "
         "better than the standard approach found in sources. "
         "If the source evidence does not surface these, name the gap explicitly — do not invent them.\n\n"
+        "UNVERIFIED STATISTICS: Some agent findings are tagged '(unverified statistic)' by the numeric "
+        "validator because they could not be grounded in the source corpus. Do NOT present these numbers "
+        "as concrete thresholds in the summary — strip the numeric value and convert to qualitative phrasing "
+        "(e.g., write 'high reliability' not '90% success rate'). Never lift unverified numbers into Key "
+        "Findings or Insights as if they were established benchmarks.\n\n"
         "EVIDENCE DISCIPLINE: Agent findings include [E]/[I]/[S] labels.\n"
         "- [E]: state confidently, include an inline markdown URL citation like [source](https://...).\n"
         "- [I]: frame as inference — 'this suggests...'\n"

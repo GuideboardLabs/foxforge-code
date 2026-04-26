@@ -33,6 +33,7 @@ _FORAGE_STAGE_LABELS: dict[str, str] = {
     "research_agent_started":  "agent running",
     "research_agent_completed":"agent done",
     "web_research_started":    "web research starting",
+    "ranking_sources":         "ranking sources",
     "web_source_discovered":   "source found",
     "persona_queries_planned": "persona queries planned",
     "web_stack_ready":         "web context ready",

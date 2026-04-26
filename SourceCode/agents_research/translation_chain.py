@@ -257,38 +257,28 @@ def enforce_final_summary_contract(
     analogy_bullets = _extract_bullets("\n".join([ln for ln in summary.splitlines() if "[A]" in ln]))
 
     if not re.search(r"^##\s+Evidence\b", summary, flags=re.IGNORECASE | re.MULTILINE):
-        sections.extend(
-            [
-                "## Evidence / Inference / Speculation Buckets",
-                "### Evidence [E]",
-                *(f"- {row}" for row in (evidence_bullets or ["No explicit [E] bucket lines extracted."])),
-                "### Inference [I]",
-                *(f"- {row}" for row in (inference_bullets or ["No explicit [I] bucket lines extracted."])),
-                "### Speculation [S]",
-                *(f"- {row}" for row in (speculation_bullets or ["No explicit [S] bucket lines extracted."])),
-                "### Analogies [A]",
-                *(f"- {row}" for row in (analogy_bullets or ["No explicit [A] bucket lines extracted."])),
-            ]
-        )
+        # Only emit sub-sections that have real content; skip Inference [I] (redundant with inline tags).
+        bucket_parts: list[str] = []
+        if evidence_bullets:
+            bucket_parts.append("### Evidence [E]")
+            bucket_parts.extend(f"- {row}" for row in evidence_bullets)
+        if speculation_bullets:
+            bucket_parts.append("### Speculation [S]")
+            bucket_parts.extend(f"- {row}" for row in speculation_bullets)
+        if analogy_bullets:
+            bucket_parts.append("### Analogies [A]")
+            bucket_parts.extend(f"- {row}" for row in analogy_bullets)
+        if bucket_parts:
+            sections.append("## Evidence Signals")
+            sections.extend(bucket_parts)
 
     if not re.search(r"^##\s+Recommended\s+Actions\b", summary, flags=re.IGNORECASE | re.MULTILINE):
         next_steps = _extract_bullets(
             "\n".join([ln for ln in summary.splitlines() if re.search(r"next steps", ln, re.IGNORECASE)])
         )
-        sections.append("## Recommended Actions")
         if next_steps:
-            sections.extend([f"- {row}" for row in next_steps])
-        else:
-            sections.append("- Convert the highest-confidence findings into an execution checklist for this project.")
-
-    if not re.search(r"^##\s+Risks\b", summary, flags=re.IGNORECASE | re.MULTILINE):
-        sections.extend(
-            [
-                "## Risks",
-                "- Evidence gaps and low-tier sources should gate irreversible decisions.",
-                "- Treat cross-domain analogies as inspiration, not proof.",
-            ]
-        )
+            sections.append("## Recommended Actions")
+            sections.extend(f"- {row}" for row in next_steps)
 
     if not re.search(r"^##\s+Insights?\b", summary, flags=re.IGNORECASE | re.MULTILINE):
         sections.extend(
@@ -317,11 +307,10 @@ def enforce_final_summary_contract(
         )
 
     if not re.search(r"^##\s+Source\s+Quality\s+Notes\b", summary, flags=re.IGNORECASE | re.MULTILINE):
-        sections.append("## Source Quality Notes")
-        if str(source_quality_warning or "").strip():
-            sections.append(f"- {str(source_quality_warning).strip()}")
-        else:
-            sections.append("- Confidence should be read with source-tier weighting and coverage gaps.")
+        warning = str(source_quality_warning or "").strip()
+        if warning:
+            sections.append("## Source Quality Notes")
+            sections.append(f"- {warning}")
 
     if not re.search(r"^##\s+Rejected\s*/?\s*Weak\s+Sources\b", summary, flags=re.IGNORECASE | re.MULTILINE):
         weak_agents: list[str] = []
@@ -335,12 +324,10 @@ def enforce_final_summary_contract(
                 score = 0
             if score > 0 and score <= 2:
                 weak_agents.append(str(row.get("agent", "agent")))
-        sections.append("## Rejected/Weak Sources")
         if weak_agents:
+            sections.append("## Rejected/Weak Sources")
             for name in sorted(set(weak_agents)):
                 sections.append(f"- Weak support from {name}; excluded from final recommendations.")
-        else:
-            sections.append("- No explicit weak-source exclusions were recorded in this run.")
 
     if analogy_sources and not re.search(r"^##\s+Design\s+Inspiration\b", summary, flags=re.IGNORECASE | re.MULTILINE):
         sections.append("## Design Inspiration (analogies - non-evidence)")

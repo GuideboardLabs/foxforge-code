@@ -2389,33 +2389,34 @@ def run_research_pool(
         )
 
     translation_meta: dict[str, Any] = {"stages": []}
-    _progress(
-        "translation_chain_started",
-        {"stages": 4},
-    )
-    try:
-        _synth_lane_cfg = lane_model_config(repo_root, "synthesis") or {}
-        _premium_cfg = _synth_lane_cfg.get("tier_premium", {}) if isinstance(_synth_lane_cfg.get("tier_premium", {}), dict) else {}
-        _premium_model = str(_premium_cfg.get("model", "")).strip()
-        _use_premium_tech = bool(_premium_model and _premium_model == str(synth_cfg.get("model", "")).strip())
-        translation_meta = run_translation_chain(
-            question=question,
-            synthesis_summary=summary_md,
-            project_context=project_context,
-            client=client,
-            repo_root=repo_root,
-            synthesis_cfg=synth_cfg,
-            use_premium_tech_lead=_use_premium_tech,
+    if str(forage_profile or "").strip().lower() != "domain":
+        _progress(
+            "translation_chain_started",
+            {"stages": 4},
         )
-        summary_md = str(translation_meta.get("summary", "") or summary_md).strip()
-    except Exception as exc:
-        LOGGER.warning("translation_chain failed: %s", exc)
-    _progress(
-        "translation_chain_completed",
-        {
-            "stages": len(translation_meta.get("stages", []) if isinstance(translation_meta, dict) else []),
-        },
-    )
+        try:
+            _synth_lane_cfg = lane_model_config(repo_root, "synthesis") or {}
+            _premium_cfg = _synth_lane_cfg.get("tier_premium", {}) if isinstance(_synth_lane_cfg.get("tier_premium", {}), dict) else {}
+            _premium_model = str(_premium_cfg.get("model", "")).strip()
+            _use_premium_tech = bool(_premium_model and _premium_model == str(synth_cfg.get("model", "")).strip())
+            translation_meta = run_translation_chain(
+                question=question,
+                synthesis_summary=summary_md,
+                project_context=project_context,
+                client=client,
+                repo_root=repo_root,
+                synthesis_cfg=synth_cfg,
+                use_premium_tech_lead=_use_premium_tech,
+            )
+            summary_md = str(translation_meta.get("summary", "") or summary_md).strip()
+        except Exception as exc:
+            LOGGER.warning("translation_chain failed: %s", exc)
+        _progress(
+            "translation_chain_completed",
+            {
+                "stages": len(translation_meta.get("stages", []) if isinstance(translation_meta, dict) else []),
+            },
+        )
 
     summary_md = ensure_project_specificity(summary_md, project_context)
     analogy_urls = [

@@ -508,6 +508,16 @@ class ResearchService:
         ordered_crawls = [crawls_by_id.get(str(p.get("id", ""))) for p in persona_queries]
         ordered_crawls = [row for row in ordered_crawls if isinstance(row, dict)]
 
+        total_raw = sum(
+            len([r for r in (c.get("result", {}) or {}).get("sources", []) if isinstance(r, dict)])
+            for c in ordered_crawls
+        )
+        if callable(progress_callback):
+            try:
+                progress_callback("ranking_sources", {"source_count": total_raw, "buckets": len(ordered_crawls)})
+            except Exception:
+                pass
+
         selected_sources: list[dict[str, Any]] = []
         tier_counts = {"tier1": 0, "tier2": 0, "tier3": 0, "tier4": 0}
         for crawl in ordered_crawls:
