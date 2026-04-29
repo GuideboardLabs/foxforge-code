@@ -2714,7 +2714,10 @@ def run_research_pool(
             primitives = None
 
     translation_meta: dict[str, Any] = {"stages": [], "recommendations": []}
-    if str(forage_profile or "").strip().lower() != "domain":
+    project_bound_forage = bool(str(project_context or "").strip())
+    translation_enabled = project_bound_forage or str(forage_profile or "").strip().lower() != "domain"
+    stack_specific_actions = resolved_intent in {"technical_planning", "implementation_support"}
+    if translation_enabled:
         _progress("translation_chain_started", {"stages": 4})
         try:
             _synth_lane_cfg = lane_model_config(repo_root, "synthesis") or {}
@@ -2730,6 +2733,7 @@ def run_research_pool(
                 synthesis_cfg=synth_cfg,
                 use_premium_tech_lead=_use_premium_tech,
                 primitives=primitives,
+                stack_specific_actions=stack_specific_actions,
             )
             summary_md = str(translation_meta.get("summary", "") or summary_md).strip()
         except Exception as exc:

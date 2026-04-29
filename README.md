@@ -52,7 +52,7 @@ Fox does not search the web. If it doesn't have enough to answer, it says so and
 
 ### DeepFox — the research layer
 
-`/forage` and `/forage --domain` run the full research pipeline under the hood. DeepFox is the orchestration layer — no personality, no editorializing, no injecting its own ideas into summaries. It reports what the evidence shows, flags gaps, and stops.
+`/forage`, `/forage --domain`, and `/forage --intent <name>` run the full research pipeline under the hood. DeepFox is the orchestration layer — no personality, no editorializing, no injecting its own ideas into summaries. It reports what the evidence shows, flags gaps, and stops.
 
 Both modes share the same pipeline skeleton. What differs is the _lens_ at each stage.
 
@@ -62,11 +62,11 @@ Use this when you want to understand how to build something: architectural trade
 
 1. **Persona-driven discovery** — 4 roles (Product Manager, Market Analyst, Project Manager, Tech Lead) each generate one search query based on the project context and research question. 4 parallel web crawls × 20 results each = 80 candidate sources.
 2. **Diversity filtering** — each persona bucket is ranked by source tier × topical relevance × intra-bucket diversity. Top 8 per persona = 32 curated sources fed to the research pool.
-3. **Research pool** — 4 parallel agents work the sources:
-   - `technical_architecture_researcher` — system design patterns, architectural tradeoffs, scalability
-   - `technical_implementation_researcher` — libraries, APIs, version specifics, gotchas
-   - `technical_risk_researcher` — security, failure modes, performance bottlenecks, tech debt
-   - `technical_market_analyst` (advisory) — ecosystem maturity, adoption trends, competitive alternatives
+3. **Research pool** — role-routed agents work the sources via topic policy + intent policy:
+   - Router inputs: `topic_type`, `research_intent`, query, project context, workspace knowledge
+   - Role classes: `primary`, `advisory`, `adjudicator`
+   - Gating: legal and quantitative roles are trigger-based, not unconditional
+   - Animal-care routing is split from medical to avoid human-clinical drift
 4. **Synthesis** → **Skeptic pass** → **Gap-fill** (if confidence is low)
 
 #### Domain mode — `/forage --domain <query>`
@@ -77,11 +77,34 @@ The logic behind the split: technical sources (Stack Overflow, GitHub, engineeri
 
 1. **Persona-driven discovery** — 3 domain-specific roles generate queries oriented toward expert knowledge, user experience, and authoritative references rather than implementation.
 2. **Diversity filtering** — same ranking as technical mode, but source tier calibration favors domain authorities over technical publishers.
-3. **Research pool** — 3 parallel agents:
-   - `practitioner_researcher` (deepseek-r1, thinking on) — what domain experts and practitioners actually know and do, beyond introductory tutorials; professional consensus, expert-level distinctions, non-obvious nuances
-   - `end_user_researcher` — real user motivations, failure patterns, friction points, behavioral predictors of success vs. dropout; what users say vs. what evidence shows they need
-   - `resource_scout` (advisory) — authoritative curricula, certifications, standards bodies, canonical reference materials; distinguishes introductory from advanced, flags outdated material
+3. **Research pool** — domain-intent roles prioritize:
+   - `domain_practitioner_researcher`
+   - `end_user_researcher`
+   - `resource_scout` (advisory, claims filtered from evidence aggregation)
+   - plus trigger-gated roles when relevant (safety, standards/certification, legal, quantitative)
 4. **Synthesis** → **Skeptic pass** → **Gap-fill** (if confidence is low)
+
+#### Intent-aware routing
+
+`research_intent` is now first-class and threads through the stack:
+- `general_research`
+- `domain_foraging`
+- `product_research`
+- `technical_planning`
+- `implementation_support`
+- `market_research`
+- `standards_research`
+- `risk_research`
+- `final_synthesis`
+
+`/forage --domain` maps to `domain_foraging` by default. `/forage --intent <name>` lets you set intent explicitly.
+
+#### Project-bound forage translation policy
+
+In project-bound forage:
+- Always translate findings to project context.
+- Only translate into stack-specific implementation actions when intent is `technical_planning` or `implementation_support`.
+- Otherwise technical notes are framed under **Possible Technical Implications** instead of direct Tech Lead actions.
 
 #### Synthesis output (both modes)
 
@@ -105,6 +128,18 @@ Evidence labels: `[E]` (evidence — cite a source URL), `[I]` (inference), `[S]
 If most sources are tier 3/4, synthesis confidence is capped and a Source Quality Warning is added.
 
 Research output is written to `Projects/<slug>/research_summaries/` and `Projects/<slug>/research_raw/`.
+Additional artifacts now include:
+- `<summary>.primitives.json` for domain primitives (`milestones`, `success_criteria`, `failure_modes`, `measurement_dimensions`)
+- `domain_summary` (domain forage runs)
+- `project_summary` and `implementation_brief` (technical planning runs)
+
+#### Quality controls and guardrails
+
+- **Skeptic sidecar**: adversarial critique/revise pass after synthesis.
+- Genericity/usefulness gate: scores artifacts and triggers at most one rewrite when outputs are too generic.
+- Recommendation-strength labels on actions: `implement_now`, `prototype`, `design_option`, `future_experiment`, `weak_do_not_prioritize`, `reject`.
+- **Public-content guardrail**: unsafe/public-content requests are filtered before synthesis output is finalized.
+- Scaffold/documentation system references include **Canon v1** and optional **runtime smoke** validation paths.
 
 ---
 
@@ -138,6 +173,7 @@ The interface is built with [Textual](https://textual.textualize.io/). Key featu
 | `/msg <text>` | Chat with Fox about the active project. No web access. |
 | `/forage <query>` | Run the full research pipeline — technical mode. Targets implementation, architecture, and ecosystem questions. |
 | `/forage --domain <query>` | Run the full research pipeline — domain mode. Targets expert knowledge, user experience, and authoritative resources rather than implementation. |
+| `/forage --intent <name> <query>` | Run forage with explicit intent routing (for example `technical_planning`, `implementation_support`, `domain_foraging`). |
 | `/plan [prompt]` | Generate a markdown plan for the project. |
 | `/execute --plan <id\|latest>` | Run a plan. |
 | `/build [prompt]` | Plan + execute in one shot. |
@@ -185,6 +221,10 @@ The interface is built with [Textual](https://textual.textualize.io/). Key featu
 
 Override anytime with `/stack change <backend> <frontend> <db> <lang>`.
 
+If a request is treated as a system-level stack decision, re-evaluate from a **Technical topic** before re-running research.
+
+Current scaffolding includes system-fixed tracks for `Flask 3.x + Vue 3.5` and `.NET 8 + Avalonia` alongside other templates. These are referred to as `system-fixed` stacks in internal docs and tests.
+
 Available stack components:
 - **Backends**: `fastapi` `flask` `django` `express` `hono` `nextjs-api` `avalonia`
 - **Frontends**: `none` `htmx` `react` `vue` `svelte` `angular`
@@ -203,12 +243,16 @@ Key roles:
 |---|---|---|
 | `reynard_layer` | `qwen3:8b` | Fox chat responses (`/msg`) |
 | `intent_confirmer` | `gemma3:4b` | Intent verification gate (skip list covers most commands) |
-| `research_market_analyst` | `qwen3:8b` | Research pool agents |
-| `research_technical` | `deepseek-r1:8b` | Research pool — technical agent |
+| `research_market_analyst` | `qwen3:8b` | Research pool baseline lane config |
+| `research_technical` | `deepseek-r1:8b` | Legacy technical-role compatibility |
+| `research_critical_analyst` | `deepseek-r1:8b` | Adjudicator role (in-pool) |
+| `research_critical_analyst_premium` | `hengwen/DeepSeek-R1-Distill-Qwen-14B:q4_k_m` | Premium escalation for critical analyst |
+| `research_contrarian_red_team_premium` | `hengwen/DeepSeek-R1-Distill-Qwen-14B:q4_k_m` | Premium escalation for contrarian/red-team |
 | `synthesis_default` | `qwen3:8b` | Research synthesis |
-| `synthesis_premium` | `qwen3:14b` | Escalated synthesis (skeptic-triggered) |
-| `plan_deep` | `qwen2.5-coder:14b` | Deep plan generation |
-| `plan_shallow` | `qwen2.5-coder:7b` | Quick plan generation |
+| `synthesis_premium` | `hengwen/DeepSeek-R1-Distill-Qwen-14B:q4_k_m` | Escalated synthesis (skeptic-triggered) |
+| `research_genericity_gate` | `qwen3:8b` | Genericity/usefulness scoring and rewrite gating |
+| `plan_deep` | `qwen3:14b` | Deep plan generation |
+| `plan_shallow` | `qwen3:8b` | Quick plan generation |
 | `execute_editor` | `qwen2.5-coder:14b` | Code execution / scaffolding |
 | `embeddings` | `qwen3-embedding:4b` | Source diversity ranking |
 

@@ -103,6 +103,7 @@ def run_translation_chain(
     synthesis_cfg: dict[str, Any] | None = None,
     use_premium_tech_lead: bool = False,
     primitives: dict[str, Any] | None = None,
+    stack_specific_actions: bool = False,
 ) -> dict[str, Any]:
     """Run PM -> Market -> Project Manager -> Tech Lead translation stages."""
     cfg = dict(synthesis_cfg or lane_model_config(repo_root, "synthesis") or {})
@@ -111,8 +112,10 @@ def run_translation_chain(
     prior_blocks: list[str] = []
 
     for stage in CHAIN_STAGES:
-        label = str(stage["label"])
         stage_id = str(stage["id"])
+        label = str(stage["label"])
+        if stage_id == "tech_lead" and not bool(stack_specific_actions):
+            label = "Possible Technical Implications"
         model = _model_for_stage(
             stage_id=stage_id,
             synthesis_cfg=cfg,
@@ -138,6 +141,11 @@ def run_translation_chain(
             "3) Mention project-specific details when possible (name, stack, workspace, maturity).\n"
             "4) Project Manager stage must include one bullet that explicitly states: new / in-development / in-theory / already-evolved.\n"
         )
+        if stage_id == "tech_lead" and not bool(stack_specific_actions):
+            user_prompt += (
+                "5) Do NOT provide direct implementation actions, step-by-step build tasks, or stack-locked prescriptions.\n"
+                "6) Frame notes as possible implications/tradeoffs only, with uncertainty where appropriate.\n"
+            )
 
         def _call(extra_instruction: str = "") -> str:
             prompt = user_prompt
