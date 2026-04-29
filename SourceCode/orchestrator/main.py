@@ -2636,6 +2636,23 @@ class FoxforgeOrchestrator:
         return None
 
     def _household_context_for_query(self, text: str, max_chars: int = 1200) -> str:
+        try:
+            from shared_tools.project_engine import ProjectEngine
+            from shared_tools.workspace_knowledge import read_workspace_knowledge, resolve_default_patterns_path
+            project = ProjectEngine(self.repo_root).get_by_slug(self.project_slug)
+            workspace = str(project.get("workspace_path") or "") if isinstance(project, dict) else ""
+            if workspace:
+                return read_workspace_knowledge(
+                    workspace,
+                    max_chars=8000,
+                    default_design_path=self.repo_root / "DESIGN.md",
+                    default_patterns_path=resolve_default_patterns_path(
+                        self.repo_root,
+                        dict(project.get("stack") or {}) if isinstance(project, dict) else None,
+                    ),
+                )
+        except Exception:
+            pass
         return ""
 
     def _watchtower_context_for_query(self, max_chars: int = 600) -> str:
@@ -3230,6 +3247,7 @@ class FoxforgeOrchestrator:
         force_research: bool = False,
         force_make: bool = False,
         forage_profile: str = "technical",
+        research_intent: str = "",
         thread_id: str = "",
         details_sink: dict[str, Any] | None = None,
     ) -> str:
@@ -3489,6 +3507,7 @@ class FoxforgeOrchestrator:
                 turn_plan=turn_plan,
                 force_research=force_research,
                 forage_profile=forage_profile,
+                research_intent=research_intent,
                 cancel_checker=cancel_checker,
                 pause_checker=pause_checker,
                 yield_checker=yield_checker,
@@ -3803,6 +3822,7 @@ class FoxforgeOrchestrator:
             reminder_note=reminder_note,
             event_note=event_note,
             details_sink=details_sink,
+            research_intent=research_intent,
         )
 
 

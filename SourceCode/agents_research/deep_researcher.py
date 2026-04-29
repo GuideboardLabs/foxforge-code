@@ -1,4 +1,5 @@
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -10,8 +11,25 @@ from urllib.parse import urlsplit
 from typing import Any, Callable
 
 from agents_research.citation_linker import build_retrieved_chunks
+from agents_research.claim_extractor import extract_claims
+from agents_research.domain_primitives import extract_primitives, persist_primitives
+from agents_research.genericity_gate import score_artifact
 from agents_research.numeric_validator import validate as validate_numeric_claims
-from agents_research.synthesizer import SynthesisUnavailableError, run_skeptic_pass, run_skeptic_pass_with_severity, synthesize
+from agents_research.output_contracts import (
+    render_domain_summary,
+    render_implementation_brief,
+    render_project_summary,
+    render_research_summary,
+)
+from agents_research.role_registry import RoleSpec, resolve_model_name
+from agents_research.role_router import legal_role_applies, quantitative_role_applies, select_roles
+from agents_research.synthesizer import (
+    SynthesisDependencyError,
+    SynthesisUnavailableError,
+    run_skeptic_pass,
+    run_skeptic_pass_with_severity,
+    synthesize,
+)
 from agents_research.translation_chain import (
     enforce_final_summary_contract,
     ensure_project_specificity,
@@ -492,6 +510,7 @@ DEFAULT_DIRECTIVES = {persona: directive for persona, directive in RESEARCH_PERS
 ANALYSIS_PROFILE_TECHNICAL      = "technical_analysis"
 ANALYSIS_PROFILE_GENERAL        = "general_analysis"
 ANALYSIS_PROFILE_MEDICAL        = "medical_analysis"
+ANALYSIS_PROFILE_ANIMAL_CARE    = "animal_care_analysis"
 ANALYSIS_PROFILE_PARENTING      = "parenting_analysis"
 ANALYSIS_PROFILE_FINANCE        = "finance_analysis"
 ANALYSIS_PROFILE_SPORTS         = "sports_analysis"
@@ -533,7 +552,7 @@ TOPIC_TYPE_TO_PROFILE: dict[str, str] = {
     "sports":         ANALYSIS_PROFILE_SPORTS,
     "technical":      ANALYSIS_PROFILE_TECHNICAL,
     "medical":        ANALYSIS_PROFILE_MEDICAL,
-    "animal_care":    ANALYSIS_PROFILE_MEDICAL,
+    "animal_care":    ANALYSIS_PROFILE_ANIMAL_CARE,
     "finance":        ANALYSIS_PROFILE_FINANCE,
     "history":        ANALYSIS_PROFILE_HISTORY,
     "science":        ANALYSIS_PROFILE_SCIENCE,
@@ -562,6 +581,21 @@ TOPIC_TYPE_TO_PROFILE: dict[str, str] = {
 
 def _analysis_profile_for_type(topic_type: str) -> str:
     return TOPIC_TYPE_TO_PROFILE.get(str(topic_type).strip().lower(), ANALYSIS_PROFILE_GENERAL)
+
+
+def _legal_role_applies(question: str, topic_type: str, project_context: str) -> bool:
+    return legal_role_applies(
+        question=str(question or "").strip(),
+        topic_type=str(topic_type or "").strip().lower(),
+        project_context=str(project_context or "").strip(),
+    )
+
+
+def _quantitative_role_applies(question: str, topic_type: str) -> bool:
+    return quantitative_role_applies(
+        question=str(question or "").strip(),
+        topic_type=str(topic_type or "").strip().lower(),
+    )
 
 
 def _sanitize_model_list(raw_models: Any) -> list[str]:
@@ -671,11 +705,38 @@ def _profile_agent_templates(profile: str) -> list[dict[str, Any]]:
                     "Flag black box warnings and active regulatory advisories."
                 ),
             },
+        ]
+    if profile == ANALYSIS_PROFILE_ANIMAL_CARE:
+        return [
             {
-                "persona": LEGAL_ANALYSIS_PERSONA,
-                "model": LEGAL_ANALYSIS_MODEL,
-                "directive": LEGAL_ANALYSIS_DIRECTIVE,
+                "persona": "domain_practitioner_researcher",
+                "model": "qwen3:8b",
+                "directive": (
+                    "Focus on practitioner-grade animal care guidance, handling methods, and context-specific best practices. "
+                    "Prefer veterinary bodies, trainer standards, and practitioner evidence over generic wellness blogs."
+                ),
+            },
+            {
+                "persona": "end_user_researcher",
+                "model": "qwen3:8b",
+                "directive": (
+                    "Focus on owner adherence, routine friction, and real-life constraints that affect outcomes."
+                ),
+            },
+            {
+                "persona": "resource_scout",
+                "model": "qwen3:8b",
+                "directive": (
+                    "Focus on trusted curricula, standards, credentials, and authoritative resources for this animal-care topic."
+                ),
                 "role": "advisory",
+            },
+            {
+                "persona": "critical_analyst",
+                "model": "qwen3:8b",
+                "directive": (
+                    "Challenge assumptions, identify contradictory guidance, and flag uncertainty in evidence quality."
+                ),
             },
         ]
     if profile == ANALYSIS_PROFILE_PARENTING:
@@ -749,12 +810,6 @@ def _profile_agent_templates(profile: str) -> list[dict[str, Any]]:
                     "Focus on downside scenarios, tail risks, liquidity constraints, regulatory headwinds. "
                     "What breaks this thesis first?"
                 ),
-            },
-            {
-                "persona": LEGAL_ANALYSIS_PERSONA,
-                "model": LEGAL_ANALYSIS_MODEL,
-                "directive": LEGAL_ANALYSIS_DIRECTIVE,
-                "role": "advisory",
             },
         ]
     if profile == ANALYSIS_PROFILE_HISTORY:
@@ -1354,17 +1409,85 @@ def _run_one_agent(
     return row
 
 
-def _agent_specs(model_cfg: dict[str, Any], topic_type: str = "general") -> list[dict[str, Any]]:
+def _agent_specs(
+    model_cfg: dict[str, Any],
+    topic_type: str = "general",
+    *,
+    question: str = "",
+    project_context: str = "",
+    research_intent: str = "general_research",
+    workspace_knowledge: str = "",
+    repo_root: Path | None = None,
+) -> list[dict[str, Any]]:
     profile = _analysis_profile_for_type(topic_type)
     templates = _profile_agent_templates(profile)
     default_validation_cycles = int(model_cfg.get("validation_cycles", 3))
     if profile in {ANALYSIS_PROFILE_MEDICAL, ANALYSIS_PROFILE_FINANCE, ANALYSIS_PROFILE_UNDERGROUND}:
         default_validation_cycles = max(4, default_validation_cycles)
 
+    # Phase 2 path: role router chooses data-driven role specs.
+    routed_rows: list[dict[str, Any]] = []
+    try:
+        roles: list[RoleSpec] = select_roles(
+            topic_type=str(topic_type or "general").strip().lower(),
+            research_intent=str(research_intent or "general_research").strip().lower(),
+            project_type=None,
+            user_query=str(question or "").strip(),
+            user_overrides=None,
+            workspace_knowledge=str(workspace_knowledge or "").strip(),
+            project_context=str(project_context or "").strip(),
+        )
+        cfg = load_config(repo_root or Path("."))
+        fallback_model = str(model_cfg.get("model", "qwen3:8b")).strip() or "qwen3:8b"
+        for role in roles:
+            directive = str(role.directive or "").strip()
+            if role.role_id in {"quantitative_evidence_analyst", STATISTICAL_ANALYSIS_PERSONA}:
+                directive = STATISTICAL_ANALYSIS_DIRECTIVE
+            elif role.role_id in {"legal_compliance_researcher", LEGAL_ANALYSIS_PERSONA}:
+                directive = LEGAL_ANALYSIS_DIRECTIVE
+            row: dict[str, Any] = {
+                "persona": role.role_id,
+                "model": resolve_model_name(role=role, config_getter=cfg.get_model, fallback_model=fallback_model),
+                "directive": directive,
+                "role": str(role.role_class or "primary").strip().lower() or "primary",
+                "validation_cycles": int(role.validation_cycles or default_validation_cycles),
+            }
+            if not bool(role.claims_allowed):
+                row["claims_allowed"] = False
+            routed_rows.append(row)
+    except Exception:
+        routed_rows = []
+
+    if routed_rows:
+        templates = routed_rows
+
+    animal_safety_triggers = ("poison", "toxic", "aggression", "medication", "injury", "breed health", "risk")
+    animal_standard_triggers = ("certification", "cpdt", "iaabc", "akc", "standards", "credentials")
+    animal_corpus = f"{str(question or '').lower()} {str(project_context or '').lower()}"
+
     base_fallbacks = _sanitize_model_list(model_cfg.get("fallback_models", []))
     out: list[dict[str, Any]] = []
     for item in templates:
         row = dict(item)
+        persona = str(row.get("persona", "")).strip()
+
+        if persona in {LEGAL_ANALYSIS_PERSONA, "legal_compliance_researcher"}:
+            if not _legal_role_applies(question, topic_type, project_context):
+                continue
+        if persona in {STATISTICAL_ANALYSIS_PERSONA, "quantitative_evidence_analyst"}:
+            if not _quantitative_role_applies(question, topic_type):
+                continue
+        if str(topic_type or "").strip().lower() == "animal_care":
+            if persona == "clinical_evidence_researcher":
+                continue
+            if persona == "safety_risk_researcher" and not any(t in animal_corpus for t in animal_safety_triggers):
+                continue
+            if persona == "standards_certification_researcher" and not any(t in animal_corpus for t in animal_standard_triggers):
+                continue
+        if str(topic_type or "").strip().lower() == "medical" and persona in {LEGAL_ANALYSIS_PERSONA, "legal_compliance_researcher"}:
+            if not _legal_role_applies(question, topic_type, project_context):
+                continue
+
         model_name = str(row.get("model", "")).strip()
         fallback = _sanitize_model_list(list(base_fallbacks) + [model_name])
         if model_name and model_name in fallback:
@@ -1372,13 +1495,12 @@ def _agent_specs(model_cfg: dict[str, Any], topic_type: str = "general") -> list
         row["fallback_models"] = fallback
         row.setdefault("validation_cycles", default_validation_cycles)
         # deepseek-r1 has built-in chain-of-thought reasoning activated by think=True.
-        # Enable it automatically for primary deepseek-r1 agents unless explicitly overridden.
-        # Advisory agents do NOT get think=True — their findings are supplementary and
-        # chain-of-thought overhead isn't justified for that role.
-        _role = str(row.get("role", "primary")).strip()
-        if str(row.get("model", "")).startswith("deepseek-r1") and "think" not in row and _role != "advisory":
+        # Enable it automatically for primary/adjudicator deepseek-r1 agents unless explicitly overridden.
+        role_name = str(row.get("role", "primary")).strip().lower() or "primary"
+        if str(row.get("model", "")).startswith("deepseek-r1") and "think" not in row and role_name != "advisory":
             row["think"] = True
         out.append(row)
+
     return out
 
 
@@ -1716,6 +1838,51 @@ def _run_multipass_agent(
     return last_result
 
 
+@dataclass(slots=True)
+class AdjudicatorContext:
+    peer_findings: list[dict[str, Any]]
+    selected_sources: list[dict[str, Any]]
+    source_tier_map: dict[str, str]
+    topic_type: str
+    research_intent: str
+    project_context: str
+    workspace_knowledge: str
+    claims: list[dict[str, Any]] | None = None
+
+
+def _adjudicator_context_md(ctx: AdjudicatorContext) -> str:
+    lines: list[str] = [
+        "AdjudicatorContext:",
+        f"- topic_type: {ctx.topic_type}",
+        f"- research_intent: {ctx.research_intent}",
+    ]
+    if ctx.project_context:
+        lines.append(f"- project_context: {ctx.project_context[:800]}")
+    if ctx.workspace_knowledge:
+        lines.append(f"- workspace_knowledge: {ctx.workspace_knowledge[:1200]}")
+    if ctx.source_tier_map:
+        lines.append("- source_tiers:")
+        for url, tier in list(ctx.source_tier_map.items())[:60]:
+            lines.append(f"  - {tier}: {url}")
+    if ctx.selected_sources:
+        lines.append("- selected_sources:")
+        for row in ctx.selected_sources[:20]:
+            url = str(row.get("url", "")).strip()
+            tier = str(row.get("source_tier", "")).strip().lower() or "tier3"
+            persona = str(row.get("originating_persona", "")).strip()
+            score = float(row.get("source_score", row.get("diversity_score", 0.0)) or 0.0)
+            if url:
+                lines.append(f"  - [{tier} {score:.2f} persona={persona}] {url}")
+    if ctx.peer_findings:
+        lines.append("- peer_findings:")
+        for row in ctx.peer_findings:
+            agent = str(row.get("agent", "agent")).strip()
+            model = str(row.get("model", "")).strip()
+            finding = str(row.get("finding", "")).strip()[:1200]
+            lines.append(f"  - {agent} ({model}): {finding}")
+    return "\n".join(lines)
+
+
 def run_research_pool(
     question: str,
     repo_root: Path,
@@ -1730,6 +1897,8 @@ def run_research_pool(
     topic_type: str = "general",
     project_context: str = "",
     forage_profile: str = "technical",
+    research_intent: str = "general_research",
+    workspace_knowledge: str = "",
 ) -> dict:
     bus.emit("research_pool", "start", {"question": question, "project": project_slug})
     _refresh_dynamic_models(repo_root)
@@ -1772,12 +1941,24 @@ def run_research_pool(
     learning = FeedbackLearningEngine(repo_root, client=client, model_cfg=orchestrator_cfg)
     learned_guidance = learning.guidance_for_lane("research", limit=5)
     resolved_type = str(topic_type or "general").strip().lower() or "general"
+    resolved_intent = str(research_intent or "").strip().lower() or "general_research"
+    if str(forage_profile or "").strip().lower() == "domain" and resolved_intent == "general_research":
+        resolved_intent = "domain_foraging"
     if str(forage_profile or "").strip().lower() == "domain":
         profile_name = ANALYSIS_PROFILE_DOMAIN
-        agents = _agent_specs(model_cfg, topic_type="domain")
+        role_topic = "domain"
     else:
         profile_name = _analysis_profile_for_type(resolved_type)
-        agents = _agent_specs(model_cfg, topic_type=resolved_type)
+        role_topic = resolved_type
+    agents = _agent_specs(
+        model_cfg,
+        topic_type=role_topic,
+        question=question,
+        project_context=project_context,
+        research_intent=resolved_intent,
+        workspace_knowledge=workspace_knowledge,
+        repo_root=repo_root,
+    )
     allowed_personas = {
         str(row.get("persona", "")).strip()
         for row in agents
@@ -1802,7 +1983,10 @@ def run_research_pool(
     visited_agents_per_leaf: dict[str, list[str]] = {"root": []}
     source_evidence = _extract_web_source_evidence(web_context)
     source_tier_map = _build_url_tier_map(source_evidence)
-    worker_count = max(1, min(int(model_cfg.get("parallel_agents", 4)), len(agents)))
+    primary_agents = [a for a in agents if str(a.get("role", "primary")).strip().lower() != "adjudicator"]
+    adjudicator_agents = [a for a in agents if str(a.get("role", "primary")).strip().lower() == "adjudicator"]
+    total_agents = len(primary_agents) + len(adjudicator_agents)
+    worker_count = max(1, min(int(model_cfg.get("parallel_agents", 4)), max(1, len(primary_agents))))
     agent_roster = [
         {
             "persona": str(a.get("persona", "")).strip(),
@@ -1814,11 +1998,14 @@ def run_research_pool(
     _progress(
         "research_pool_started",
         {
-            "agents_total": len(agents),
+            "agents_total": total_agents,
+            "primary_agents_total": len(primary_agents),
+            "adjudicator_agents_total": len(adjudicator_agents),
             "agents": agent_roster,
             "workers": worker_count,
             "project": project_slug,
             "topic_type": resolved_type,
+            "research_intent": resolved_intent,
             "analysis_profile": profile_name,
         },
     )
@@ -1842,7 +2029,7 @@ def run_research_pool(
             "message": "Research cancelled before execution.",
             "summary_path": summary_path,
             "web_context_used": bool(web_context.strip()),
-            "reliability": {"agents_total": len(agents), "good": 0, "weak": 0, "failed": 0},
+            "reliability": {"agents_total": total_agents, "good": 0, "weak": 0, "failed": 0},
             "canceled": True,
             "cancel_summary": cancel_summary,
         }
@@ -1855,20 +2042,20 @@ def run_research_pool(
     # Sort agents by model name so same-model agents run consecutively.
     # This keeps each model warm in VRAM across back-to-back calls,
     # reducing Ollama load/evict churn within the pool.
-    queue = sorted(agents, key=lambda a: str(a.get("model", "")))
+    queue = sorted(primary_agents, key=lambda a: str(a.get("model", "")))
     try:
         while queue or pending:
             if _is_cancelled():
                 canceled = True
                 _progress(
                     "research_cancel_requested",
-                    {"completed": len(findings), "total": len(agents)},
+                    {"completed": len(findings), "total": len(primary_agents)},
                 )
                 break
             if _is_paused():
                 _progress(
                     "foraging_paused",
-                    {"completed": len(findings), "total": len(agents), "active_workers": len(pending)},
+                    {"completed": len(findings), "total": len(primary_agents), "active_workers": len(pending)},
                 )
                 time.sleep(0.5)
                 continue
@@ -1901,7 +2088,7 @@ def run_research_pool(
                         "role": str(agent_cfg.get("role", "primary")).strip(),
                         "model": str(agent_cfg.get("model", "")).strip(),
                         "completed": len(findings),
-                        "total": len(agents),
+                        "total": len(primary_agents),
                         "active_workers": len(pending),
                         "yield_mode": bool(_should_yield()),
                     },
@@ -1942,7 +2129,7 @@ def run_research_pool(
                     "research_agent_completed",
                     {
                         "completed": len(findings),
-                        "total": len(agents),
+                        "total": len(primary_agents),
                         "agent": str(result.get("agent", "")),
                         "role": str(result.get("role", "primary")),
                         "failed": _finding_failed,
@@ -2005,7 +2192,7 @@ def run_research_pool(
                             "research_agent_completed",
                             {
                                 "completed": len(findings),
-                                "total": len(agents),
+                                "total": len(primary_agents),
                                 "agent": target_name,
                                 "role": str(handoff_result.get("role", "primary")),
                                 "failed": _is_failure_text(handoff_text),
@@ -2059,6 +2246,79 @@ def run_research_pool(
         else:
             executor.shutdown(wait=True, cancel_futures=False)
 
+    if not canceled and adjudicator_agents:
+        adjudicator_ctx = AdjudicatorContext(
+            peer_findings=[dict(row) for row in findings if isinstance(row, dict)],
+            selected_sources=[dict(row) for row in source_evidence if isinstance(row, dict)],
+            source_tier_map=dict(source_tier_map),
+            topic_type=resolved_type,
+            research_intent=resolved_intent,
+            project_context=str(project_context or "").strip(),
+            workspace_knowledge=str(workspace_knowledge or "").strip(),
+            claims=None,
+        )
+        adjudicator_context_md = _adjudicator_context_md(adjudicator_ctx)
+        for adjudicator_cfg in adjudicator_agents:
+            persona = str(adjudicator_cfg.get("persona", "adjudicator")).strip() or "adjudicator"
+            cfg = dict(adjudicator_cfg)
+            base_directive = str(cfg.get("directive", "")).strip()
+            cfg["directive"] = (
+                f"{base_directive}\n\n"
+                "You are in adjudicator mode. Do not crawl new sources. Critique only from peer findings and selected sources.\n\n"
+                f"{adjudicator_context_md}"
+            ).strip()
+            _progress(
+                "adjudicator_started",
+                {
+                    "agent": persona,
+                    "completed": len(findings),
+                    "total": total_agents,
+                    "role": "adjudicator",
+                },
+            )
+            try:
+                result = _run_multipass_agent(
+                    client,
+                    model_cfg,
+                    cfg,
+                    question,
+                    learned_guidance,
+                    adjudicator_context_md,
+                    source_evidence,
+                    prior_messages,
+                    cancel_checker,
+                    pause_checker,
+                    allowed_personas,
+                )
+            except Exception as exc:
+                result = {
+                    "agent": persona,
+                    "model": "",
+                    "requested_model": "",
+                    "finding": f"Model call failed for {persona}: {exc}",
+                    "role": "adjudicator",
+                }
+            result["role"] = "adjudicator"
+            finding_text = str(result.get("finding", "")).strip()
+            if _is_failure_text(finding_text):
+                conf = 0
+            elif isinstance(result.get("self_score_confidence"), (int, float)):
+                conf = max(1, min(5, int(round(float(result.get("self_score_confidence", 0.0)) * 5))))
+            else:
+                conf = _self_check(client, model_cfg, question, finding_text)
+            result["confidence"] = conf
+            findings.append(result)
+            _progress(
+                "adjudicator_completed",
+                {
+                    "agent": persona,
+                    "completed": len(findings),
+                    "total": total_agents,
+                    "failed": _is_failure_text(finding_text),
+                    "confidence": conf,
+                },
+            )
+
     pre_reliability = _reliability_summary(findings)
     if not canceled and pre_reliability.get("failed", 0) > 0:
         findings = _recover_failed_findings(
@@ -2104,6 +2364,7 @@ def run_research_pool(
             source_tier_map,
         )
     retrieved_chunks = build_retrieved_chunks(findings)
+    claims, extraction_telemetry = extract_claims(findings)
 
     store = ProjectStore(repo_root)
 
@@ -2140,13 +2401,13 @@ def run_research_pool(
             "# Research Synthesis (Cancelled)\n\n"
             f"Question: {question}\n\n"
             "The request was cancelled by the user. This is a partial synthesis from completed workers only.\n\n"
-            f"Completed worker findings: {len(findings)} / {len(agents)}\n\n"
+            f"Completed worker findings: {len(findings)} / {len(primary_agents)}\n\n"
             f"{partial}\n"
         )
         summary_path = store.write_project_file(project_slug, "research_summaries", summary_name, cancel_md)
         cancel_summary = (
             "Request cancelled during Foraging.\n"
-            f"- completed_workers: {len(findings)} / {len(agents)}\n"
+            f"- completed_workers: {len(findings)} / {len(primary_agents)}\n"
             f"- partial_raw_notes: {raw_path}\n"
             f"- partial_summary: {summary_path}"
         )
@@ -2158,7 +2419,7 @@ def run_research_pool(
                 "raw_path": str(raw_path),
                 "summary_path": str(summary_path),
                 "completed_workers": len(findings),
-                "agents_total": len(agents),
+                "agents_total": len(primary_agents),
             },
         )
         _progress(
@@ -2167,7 +2428,7 @@ def run_research_pool(
                 "summary_path": str(summary_path),
                 "raw_path": str(raw_path),
                 "completed_workers": len(findings),
-                "agents_total": len(agents),
+                "agents_total": len(primary_agents),
             },
         )
         return {
@@ -2244,8 +2505,43 @@ def run_research_pool(
         {
             "model": str(synth_cfg.get("model", "")).strip(),
             "findings_collected": len(findings),
+            "claims_count": int(extraction_telemetry.get("claims_count", 0) or 0),
+            "extraction_quality": str(extraction_telemetry.get("extraction_quality", "partial")),
         },
     )
+    adjudication_required = any(str(row.get("persona", "")).strip() == "evidence_adjudicator" for row in agents)
+    adjudication_present = any(
+        str(row.get("agent", "")).strip() == "evidence_adjudicator"
+        and not _is_failure_text(str(row.get("finding", "")))
+        for row in findings
+    )
+    if adjudication_required and not adjudication_present:
+        dep_err = SynthesisDependencyError(
+            "Synthesis dependency missing: evidence_adjudicator output required before synthesis."
+        )
+        _progress(
+            "synthesis_unavailable",
+            {
+                "reason": str(dep_err),
+                "raw_path": str(raw_path),
+            },
+        )
+        return {
+            "message": (
+                "Research could not complete - required evidence adjudication was unavailable. "
+                f"Raw agent findings saved to {raw_path}."
+            ),
+            "summary_path": "",
+            "critique_path": "",
+            "raw_path": str(raw_path),
+            "web_context_used": bool(web_context.strip()),
+            "reliability": reliability,
+            "numeric_validation": numeric_validation,
+            "synthesis_unavailable": True,
+            "findings": findings,
+            "retrieved_chunks": [],
+            "visited_agents_per_leaf": visited_agents_per_leaf,
+        }
     warning_banner = ""
     if dcr_enabled:
         _progress(
@@ -2388,12 +2684,38 @@ def run_research_pool(
             },
         )
 
-    translation_meta: dict[str, Any] = {"stages": []}
+    primitives: dict[str, Any] | None = None
+    primitives_path = ""
+    if resolved_intent in {"domain_foraging", "technical_planning", "final_synthesis"}:
+        try:
+            primitives = extract_primitives(
+                question=question,
+                synthesis_md=summary_md,
+                claims=claims,
+                client=client,
+                model_cfg=synth_cfg,
+                research_intent=resolved_intent,
+            )
+            primitives_path = persist_primitives(
+                repo_root=repo_root,
+                project_slug=project_slug,
+                summary_path="",
+                primitives=primitives,
+            )
+            _progress(
+                "domain_primitives_completed",
+                {
+                    "path": primitives_path,
+                    "enabled": bool(primitives.get("enabled", False) if isinstance(primitives, dict) else False),
+                },
+            )
+        except Exception as exc:
+            LOGGER.warning("domain primitives failed: %s", exc)
+            primitives = None
+
+    translation_meta: dict[str, Any] = {"stages": [], "recommendations": []}
     if str(forage_profile or "").strip().lower() != "domain":
-        _progress(
-            "translation_chain_started",
-            {"stages": 4},
-        )
+        _progress("translation_chain_started", {"stages": 4})
         try:
             _synth_lane_cfg = lane_model_config(repo_root, "synthesis") or {}
             _premium_cfg = _synth_lane_cfg.get("tier_premium", {}) if isinstance(_synth_lane_cfg.get("tier_premium", {}), dict) else {}
@@ -2407,16 +2729,21 @@ def run_research_pool(
                 repo_root=repo_root,
                 synthesis_cfg=synth_cfg,
                 use_premium_tech_lead=_use_premium_tech,
+                primitives=primitives,
             )
             summary_md = str(translation_meta.get("summary", "") or summary_md).strip()
         except Exception as exc:
             LOGGER.warning("translation_chain failed: %s", exc)
         _progress(
             "translation_chain_completed",
-            {
-                "stages": len(translation_meta.get("stages", []) if isinstance(translation_meta, dict) else []),
-            },
+            {"stages": len(translation_meta.get("stages", []) if isinstance(translation_meta, dict) else [])},
         )
+
+    recommendations = (
+        list(translation_meta.get("recommendations", []))
+        if isinstance(translation_meta.get("recommendations", []), list)
+        else []
+    )
 
     summary_md = ensure_project_specificity(summary_md, project_context)
     analogy_urls = [
@@ -2439,7 +2766,143 @@ def run_research_pool(
     if warning_banner:
         summary_md = f"**Warning:** {warning_banner}\n\n{summary_md}"
 
+    project_meta = {"slug": project_slug}
+    recommendations = recommendations if isinstance(recommendations, list) else []
+    artifacts: dict[str, str] = {
+        "research_summary": render_research_summary(
+            synthesis_md=summary_md,
+            claims=claims,
+            primitives=primitives,
+            recommendations=recommendations,
+            project_metadata=project_meta,
+        )
+    }
+    if resolved_intent == "domain_foraging" or str(forage_profile or "").strip().lower() == "domain":
+        artifacts["domain_summary"] = render_domain_summary(
+            synthesis_md=summary_md,
+            claims=claims,
+            primitives=primitives,
+            recommendations=recommendations,
+            project_metadata=project_meta,
+        )
+    if resolved_intent == "technical_planning":
+        artifacts["project_summary"] = render_project_summary(
+            synthesis_md=summary_md,
+            claims=claims,
+            primitives=primitives,
+            recommendations=recommendations,
+            project_metadata=project_meta,
+        )
+        artifacts["implementation_brief"] = render_implementation_brief(
+            synthesis_md=summary_md,
+            claims=claims,
+            primitives=primitives,
+            recommendations=recommendations,
+            project_metadata=project_meta,
+        )
+
+    try:
+        genericity_model = str(load_config(repo_root).section("models").get("research_genericity_gate", "qwen3:8b")).strip() or "qwen3:8b"
+    except Exception:
+        genericity_model = "qwen3:8b"
+    genericity_cfg = {"model": genericity_model}
+    genericity_telemetry: dict[str, Any] = {}
+    rewrites_triggered = 0
+    for kind, body in list(artifacts.items()):
+        gate = score_artifact(
+            artifact_kind=kind if kind in {"research_summary", "domain_summary", "project_summary", "implementation_brief"} else "research_summary",
+            artifact_md=body,
+            primitives=primitives,
+            project_context=project_context,
+            workspace_knowledge=workspace_knowledge,
+            client=client,
+            model_cfg=genericity_cfg,
+        )
+        genericity_telemetry[kind] = dict(gate)
+        needs_rewrite = kind in {"domain_summary", "project_summary", "implementation_brief"} and (
+            int(gate.get("genericity_score", 0) or 0) >= 4 or int(gate.get("usefulness_score", 0) or 0) <= 1
+        )
+        if needs_rewrite:
+            rewrites_triggered += 1
+            try:
+                rewritten = str(
+                    client.chat(
+                        model=genericity_model,
+                        fallback_models=[],
+                        system_prompt=(
+                            "Rewrite this artifact to remove generic phrasing and ground it in project context and primitives. "
+                            "Replace each generic phrase with a concrete recommendation or remove the bullet."
+                        ),
+                        user_prompt=(
+                            f"Artifact kind: {kind}\n\n"
+                            f"Artifact:\n{body[:7000]}\n\n"
+                            f"Generic phrases:\n{gate.get('generic_phrases', [])}\n\n"
+                            f"Missing specifics:\n{gate.get('missing_specifics', [])}\n\n"
+                            f"Primitives:\n{json.dumps(primitives or {}, ensure_ascii=True)[:3000]}\n\n"
+                            f"Project context:\n{project_context[:1500]}\n\n"
+                            f"Workspace knowledge:\n{workspace_knowledge[:1500]}\n"
+                        ),
+                        temperature=0.1,
+                        num_ctx=12288,
+                        think=False,
+                        timeout=420,
+                        retry_attempts=1,
+                        retry_backoff_sec=1.0,
+                        task_class="genericity_rewrite",
+                        tier="default",
+                    )
+                    or ""
+                ).strip()
+                if rewritten:
+                    artifacts[kind] = rewritten
+                    gate2 = score_artifact(
+                        artifact_kind=kind if kind in {"research_summary", "domain_summary", "project_summary", "implementation_brief"} else "research_summary",
+                        artifact_md=rewritten,
+                        primitives=primitives,
+                        project_context=project_context,
+                        workspace_knowledge=workspace_knowledge,
+                        client=client,
+                        model_cfg=genericity_cfg,
+                    )
+                    genericity_telemetry[f"{kind}_post_rewrite"] = dict(gate2)
+                    if int(gate2.get("genericity_score", 0) or 0) >= 4:
+                        artifacts[kind] = (
+                            "Genericity warning: this output is more generic than ideal - consider re-running with richer project context.\n\n"
+                            f"{artifacts[kind]}"
+                        )
+            except Exception:
+                pass
+
+    summary_md = artifacts.get("research_summary", summary_md)
     summary_path = store.write_project_file(project_slug, "research_summaries", summary_name, summary_md)
+    if primitives:
+        try:
+            primitives_path = persist_primitives(
+                repo_root=repo_root,
+                project_slug=project_slug,
+                summary_path=str(summary_path),
+                primitives=primitives,
+            )
+        except Exception:
+            pass
+
+    extra_artifacts: dict[str, str] = {}
+    if "domain_summary" in artifacts:
+        domain_name = store.timestamped_name("domain_summary")
+        extra_artifacts["domain_summary"] = str(
+            store.write_project_file(project_slug, "research_summaries", domain_name, artifacts["domain_summary"])
+        )
+    if "project_summary" in artifacts:
+        proj_name = store.timestamped_name("project_summary")
+        extra_artifacts["project_summary"] = str(
+            store.write_project_file(project_slug, "research_summaries", proj_name, artifacts["project_summary"])
+        )
+    if "implementation_brief" in artifacts:
+        impl_name = store.timestamped_name("implementation_brief")
+        extra_artifacts["implementation_brief"] = str(
+            store.write_project_file(project_slug, "research_summaries", impl_name, artifacts["implementation_brief"])
+        )
+
     if not critique_log.strip():
         critique_log = "_Skeptic pass produced no output for this run._"
     critique_name = f"{summary_name}.critique.md"
@@ -2453,6 +2916,9 @@ def run_research_pool(
             "critique_path": critique_path,
             "findings_collected": len(findings),
             "recycled_open_questions": recycled_questions,
+            "primitives_path": primitives_path,
+            "extra_artifacts": extra_artifacts,
+            "rewrites_triggered": rewrites_triggered,
         },
     )
 
@@ -2475,16 +2941,23 @@ def run_research_pool(
             "critique_path": critique_path,
             "model": model_cfg.get("model", ""),
             "workers": worker_count,
-            "agents_total": len(agents),
+            "agents_total": total_agents,
             "models_used": sorted({str(x.get("model", "")).strip() for x in findings if str(x.get("model", "")).strip()}),
             "web_context_used": bool(web_context.strip()),
             "reliability": reliability,
             "analysis_profile": profile_name,
             "topic_type": resolved_type,
+            "research_intent": resolved_intent,
             "recycled_open_questions": recycled_questions,
             "warning_banner": warning_banner,
             "numeric_validation": numeric_validation,
             "translation_stages": len(translation_meta.get("stages", []) if isinstance(translation_meta, dict) else []),
+            "recommendations_count": len(recommendations),
+            "primitives_path": primitives_path,
+            "extra_artifacts": extra_artifacts,
+            "genericity": genericity_telemetry,
+            "rewrites_triggered": rewrites_triggered,
+            "extraction_telemetry": extraction_telemetry,
         },
     )
 
@@ -2502,9 +2975,18 @@ def run_research_pool(
         "numeric_validation": numeric_validation,
         "analysis_profile": profile_name,
         "topic_type": resolved_type,
+        "research_intent": resolved_intent,
         "recycled_open_questions": recycled_questions,
         "warning_banner": warning_banner,
         "translation_chain": translation_meta,
+        "recommendations": recommendations,
+        "primitives": primitives or {},
+        "primitives_path": primitives_path,
+        "extra_artifacts": extra_artifacts,
+        "genericity": genericity_telemetry,
+        "rewrites_triggered": rewrites_triggered,
+        "claims": claims,
+        "extraction_telemetry": extraction_telemetry,
         "findings": findings,
         "retrieved_chunks": retrieved_chunks,
         "visited_agents_per_leaf": visited_agents_per_leaf,

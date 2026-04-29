@@ -1,0 +1,8 @@
+[
+  {"url": "https://docs.python.org/3/library/pathlib.html", "expected_tier": "tier1"},
+  {"url": "https://pypi.org/project/requests/", "expected_tier": "tier1"},
+  {"url": "https://stackoverflow.com/questions/1/example", "expected_tier": "tier2"},
+  {"url": "https://medium.com/some-post", "expected_tier": "tier3"},
+  {"url": "https://www.linkedin.com/posts/some-user-post", "expected_tier": "tier3"},
+  {"url": "https://www.reddit.com/r/python/comments/example", "expected_tier": "tier3"}
+]

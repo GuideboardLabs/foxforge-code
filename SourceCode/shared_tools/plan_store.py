@@ -79,6 +79,14 @@ class PlanStore:
             conn.commit()
         return plan_id
 
+    def list_plans(self, project_slug: str, limit: int = 10) -> list[Plan]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM plans WHERE project_slug = ? ORDER BY created_at DESC LIMIT ?",
+                (project_slug, max(1, int(limit))),
+            ).fetchall()
+        return [p for p in (_to_plan(r) for r in rows) if p is not None]
+
     def latest_plan(self, project_slug: str) -> Plan | None:
         with self._connect() as conn:
             row = conn.execute(

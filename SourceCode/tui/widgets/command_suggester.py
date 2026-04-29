@@ -17,6 +17,7 @@ _COMMANDS = [
     "/execute --plan latest",
     "/forage ",
     "/forage --domain ",
+    "/forage --intent ",
     "/git commit",
     "/git init",
     "/git push",
@@ -37,6 +38,10 @@ _COMMANDS = [
     "/stack show",
     "/system",
     "/view",
+    "/view --plan",
+    "/view --plan latest",
+    "/view --plan list",
+    "/view --plan --fancy",
     "/view --summary",
     "/view --raw",
     "/view --fancy",
@@ -52,6 +57,13 @@ _MODEL_ROLES = [
     "make_tool_implementer", "make_webapp_architect", "make_webapp_implementer",
     "make_desktop_architect", "make_desktop_implementer",
     "plan_deep", "plan_shallow", "execute_editor", "stack_recommender",
+    "research_critical_analyst", "research_quant_evidence", "research_context_background",
+    "research_implications", "research_evidence_adjudicator", "research_project_translator",
+    "research_domain_practitioner", "research_end_user", "research_resource_scout",
+    "research_safety_risk", "research_technical_feasibility", "research_comparative_market",
+    "research_standards_certification", "research_legal_compliance", "research_contrarian_red_team",
+    "research_critical_analyst_premium", "research_contrarian_red_team_premium",
+    "research_synthesis_premium_alt", "research_genericity_gate",
 ]
 
 

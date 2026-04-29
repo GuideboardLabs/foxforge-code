@@ -17,6 +17,10 @@ class SynthesisUnavailableError(RuntimeError):
     """Raised when the synthesis model is unavailable or produces no output."""
 
 
+class SynthesisDependencyError(RuntimeError):
+    """Raised when required pre-synthesis dependencies are missing."""
+
+
 def _last_wait_error(client: Any) -> str:
     err = str(getattr(client, "last_wait_error", "") or "").strip()
     if err:

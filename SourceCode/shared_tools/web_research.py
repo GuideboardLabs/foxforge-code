@@ -5828,3 +5828,11 @@ class CrossDomainContradictionDetector:
                 })
 
         return contradictions[:5]
+
+
+def source_tier_for_url(url: str) -> str:
+    """Test helper: expose deterministic URL->tier assignment."""
+    engine = WebResearchEngine(Path("."))
+    host = engine._hostname(str(url or ""))
+    tier, _score = engine._domain_tier(host)
+    return str(tier or "tier3").strip().lower() or "tier3"

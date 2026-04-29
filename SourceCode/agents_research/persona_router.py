@@ -76,14 +76,17 @@ def build_project_context_block(repo_root: Path, project_slug: str) -> str:
     return "\n".join(lines)
 
 
-def _active_personas(forage_profile: str) -> list[dict[str, str]]:
+def _active_personas(forage_profile: str, research_intent: str = "") -> list[dict[str, str]]:
+    intent = str(research_intent or "").strip().lower()
+    if intent == "domain_foraging":
+        return DOMAIN_PERSONAS
     return DOMAIN_PERSONAS if str(forage_profile or "").strip().lower() == "domain" else PERSONAS
 
 
-def _fallback_queries(question: str, forage_profile: str = "technical") -> list[dict[str, str]]:
+def _fallback_queries(question: str, forage_profile: str = "technical", research_intent: str = "") -> list[dict[str, str]]:
     base = " ".join(str(question or "").strip().split())
     out: list[dict[str, str]] = []
-    for row in _active_personas(forage_profile):
+    for row in _active_personas(forage_profile, research_intent):
         lens = str(row.get("query_lens", "")).strip()
         out.append(
             {
@@ -95,7 +98,7 @@ def _fallback_queries(question: str, forage_profile: str = "technical") -> list[
     return out
 
 
-def _parse_query_payload(raw: str) -> list[dict[str, str]]:
+def _parse_query_payload(raw: str, personas: list[dict[str, str]]) -> list[dict[str, str]]:
     body = str(raw or "").strip()
     if not body:
         return []
@@ -125,7 +128,7 @@ def _parse_query_payload(raw: str) -> list[dict[str, str]]:
     if not isinstance(raw_queries, list):
         return []
 
-    by_id = {str(row["id"]): row for row in PERSONAS}
+    by_id = {str(row["id"]): row for row in personas}
     out: list[dict[str, str]] = []
     for row in raw_queries:
         if not isinstance(row, dict):
@@ -145,7 +148,7 @@ def _parse_query_payload(raw: str) -> list[dict[str, str]]:
     # Ensure stable persona order and fill missing rows.
     out_by_id = {str(row["id"]): row for row in out}
     merged: list[dict[str, str]] = []
-    for persona in PERSONAS:
+    for persona in personas:
         pid = str(persona["id"])
         if pid in out_by_id:
             merged.append(out_by_id[pid])
@@ -159,12 +162,13 @@ def generate_persona_queries(
     client: Any,
     repo_root: Path,
     forage_profile: str = "technical",
+    research_intent: str = "",
 ) -> list[dict[str, str]]:
     cfg = lane_model_config(repo_root, "intent_confirmer") or {}
     model = str(cfg.get("model", "gemma3:4b")).strip() or "gemma3:4b"
     fallback = cfg.get("fallback_models", ["qwen3:4b"]) if isinstance(cfg.get("fallback_models", []), list) else ["qwen3:4b"]
 
-    personas = _active_personas(forage_profile)
+    personas = _active_personas(forage_profile, research_intent)
     persona_lines = "\n".join(
         f"- {row['id']}: {row['label']} | lens={row['query_lens']}" for row in personas
     )
@@ -200,14 +204,14 @@ def generate_persona_queries(
             tier="default",
         )
     except Exception:
-        return _fallback_queries(question, forage_profile)
+        return _fallback_queries(question, forage_profile, research_intent)
 
-    parsed = _parse_query_payload(str(raw or ""))
+    parsed = _parse_query_payload(str(raw or ""), personas)
     if len(parsed) == len(personas):
         return parsed
 
     # Merge whatever parsed with deterministic fallbacks.
-    fallback_rows = {row["id"]: row for row in _fallback_queries(question, forage_profile)}
+    fallback_rows = {row["id"]: row for row in _fallback_queries(question, forage_profile, research_intent)}
     parsed_rows = {row["id"]: row for row in parsed}
     merged: list[dict[str, str]] = []
     for persona in personas:

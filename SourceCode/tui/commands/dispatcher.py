@@ -13,9 +13,13 @@ SOURCE = ROOT / "SourceCode"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
+from agents_research.persona_router import build_project_context_block
 from orchestrator.main import FoxforgeOrchestrator
+from orchestrator.memory.research_memory import read_research_context
+from shared_tools.workspace_knowledge import read_workspace_knowledge, resolve_default_patterns_path
 from shared_tools.config_ini import load_config
 from shared_tools.conversation_store import ConversationStore
+from shared_tools.project_context_memory import ProjectContextMemory
 from shared_tools.git_service import GitServiceError
 from shared_tools import git_service
 from shared_tools.plan_store import PlanStore
@@ -71,6 +75,83 @@ Scope:
 - You do not do general chat, life advice, or anything outside of building software.
 - If asked something outside that scope, redirect once, briefly.\
 """
+
+
+_FOXFORGE_MD_TEMPLATE = """\
+# {project_name}
+
+## Project context
+{description}
+
+## Stack
+- Backend: {backend}
+- Frontend: {frontend}
+- Database: {database}
+- Language: {language}
+
+See `PATTERNS.md` for stack-specific conventions.
+
+## Domain knowledge
+_Add domain context here — what this project is about, who uses it, what they need._
+
+## Architectural decisions
+_Add decisions and their rationale as the project evolves._
+
+## Project-specific conventions
+_Override or extend `PATTERNS.md` here when this project diverges from stack defaults._
+"""
+
+
+def _scaffold_foxforge_md(workspace: Path, project: dict, description: str) -> None:
+    target = workspace / "FOXFORGE.md"
+    if target.exists():
+        return
+    stack = dict(project.get("stack") or {})
+    try:
+        content = _FOXFORGE_MD_TEMPLATE.format(
+            project_name=str(project.get("name") or workspace.name),
+            description=description.strip() or "(no description provided)",
+            backend=str(stack.get("backend") or "none"),
+            frontend=str(stack.get("frontend") or "none"),
+            database=str(stack.get("database") or "none"),
+            language=str(stack.get("language") or "none"),
+        )
+        target.write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+
+
+_WORKSPACE_SKIP = frozenset({
+    "node_modules", ".venv", "venv", "__pycache__", ".git", "build", "dist",
+    ".next", "target", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
+    "*.egg-info",
+})
+
+
+def _scan_workspace_tree(workspace_path: str, max_files: int = 120, max_depth: int = 4) -> str:
+    root = Path(str(workspace_path or "").strip())
+    if not root.exists():
+        return ""
+    lines: list[str] = []
+    try:
+        for path in sorted(root.rglob("*")):
+            if any(part in _WORKSPACE_SKIP or part.endswith(".egg-info") for part in path.parts):
+                continue
+            if not path.is_file():
+                continue
+            try:
+                rel = path.relative_to(root)
+            except ValueError:
+                continue
+            if len(rel.parts) > max_depth:
+                continue
+            lines.append(str(rel))
+            if len(lines) >= max_files:
+                lines.append(f"… ({max_files}+ files, tree truncated)")
+                break
+    except Exception:
+        pass
+    return "\n".join(lines)
 
 
 @dataclass(slots=True)
@@ -219,6 +300,7 @@ class CommandDispatcher:
             workspace_path=str(workspace),
         )
         build_stack(project, "Initial scaffold from /new", repo_root=self.repo_root)
+        _scaffold_foxforge_md(workspace, project, description)
         self._create_project_conversation(state, project["slug"])
         self._seed_project_memory(project["slug"], description)
         state.active_project_slug = project["slug"]
@@ -363,10 +445,22 @@ class CommandDispatcher:
     def _cmd_forage(self, args: list[str], state: DispatcherState, progress_fn=None) -> CommandOutcome:
         domain_mode = "--domain" in args
         clean_args = [a for a in args if a != "--domain"]
+        research_intent = ""
+        if "--intent" in clean_args:
+            try:
+                idx = clean_args.index("--intent")
+                research_intent = str(clean_args[idx + 1]).strip().lower()
+                clean_args = clean_args[:idx] + clean_args[idx + 2 :]
+            except Exception:
+                return CommandOutcome(
+                    "Usage: /forage [--domain] [--intent <name>] <query>",
+                    error=True,
+                    active_project_slug=state.active_project_slug,
+                )
         prompt = " ".join(clean_args).strip()
         if not prompt:
             return CommandOutcome(
-                "Usage: /forage <query>  |  /forage --domain <query>",
+                "Usage: /forage <query>  |  /forage --domain <query>  |  /forage --intent technical_planning <query>",
                 error=True,
                 active_project_slug=state.active_project_slug,
             )
@@ -400,13 +494,51 @@ class CommandDispatcher:
             progress_fn(f"{label}{extra}")
 
         forage_profile = "domain" if domain_mode else "technical"
-        out = orch.handle_message(prompt, force_research=True, forage_profile=forage_profile, progress_callback=_progress)
+        out = orch.handle_message(
+            prompt,
+            force_research=True,
+            forage_profile=forage_profile,
+            research_intent=research_intent,
+            progress_callback=_progress,
+        )
         return CommandOutcome(str(out or "Research completed."), active_project_slug=state.active_project_slug)
 
     def _cmd_view(self, args: list[str], state: DispatcherState) -> CommandOutcome:
         slug = state.active_project_slug or "general"
         flags = {a.lstrip("-") for a in args if a.startswith("--")}
         fancy = "fancy" in flags
+
+        # --- plan viewing ---
+        if "plan" in flags:
+            ref = next((a for a in args if not a.startswith("--")), "latest")
+            if ref == "plans" or ref == "list":
+                plans = self.plan_store.list_plans(slug, limit=10)
+                if not plans:
+                    return CommandOutcome("No plans found for this project.", error=True, active_project_slug=state.active_project_slug)
+                lines = [f"Plans for **{slug}**:\n"]
+                for p in plans:
+                    status = "✓ executed" if p.executed_at else "pending"
+                    superseded = " (superseded)" if p.superseded_by else ""
+                    lines.append(f"- `{p.id}` — {p.created_at[:10]} — {status}{superseded}")
+                    if p.prompt:
+                        lines.append(f"  _{p.prompt[:100]}_")
+                return CommandOutcome("\n".join(lines), active_project_slug=state.active_project_slug, render_md=True)
+            plan = self._resolve_plan_ref(slug, ref)
+            if plan is None:
+                return CommandOutcome(f"Plan not found: {ref}", error=True, active_project_slug=state.active_project_slug)
+            status = f"executed {plan.executed_at[:10]}" if plan.executed_at else "not yet executed"
+            header = f"**Plan `{plan.id}`** — {status}\n_Prompt: {plan.prompt}_\n\n---\n\n"
+            if fancy:
+                import tempfile, subprocess as _sp
+                from SourceCode.tui.widgets.reasoning_stream import _grip_port
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as tmp:
+                    tmp.write(f"# Plan `{plan.id}`\n\n> {plan.prompt}\n\n---\n\n{plan.body_md}")
+                    tmp_path = tmp.name
+                port = _grip_port(tmp_path)
+                import time as _t; _t.sleep(0.8)
+                _sp.Popen(["xdg-open", f"http://localhost:{port}"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                return CommandOutcome(f"Opened plan {plan.id} in browser → http://localhost:{port}", active_project_slug=state.active_project_slug)
+            return CommandOutcome(header + plan.body_md, active_project_slug=state.active_project_slug, render_md=True)
 
         project = self.project_engine.get_by_slug(slug)
         workspace = Path(project["workspace_path"]) if project else None
@@ -476,41 +608,101 @@ class CommandDispatcher:
         except Exception:
             return None
 
-    def _generate_plan_markdown(self, prompt: str, *, kind: str) -> str:
+    def _generate_plan_markdown(
+        self,
+        prompt: str,
+        *,
+        kind: str,
+        project_slug: str = "",
+        workspace: str = "",
+        project_stack: dict[str, Any] | None = None,
+    ) -> str:
         cfg = load_config(self.repo_root)
         model_role = "plan_deep" if kind == "deep" else "plan_shallow"
         model = cfg.get_model(model_role)
-        system = (
-            "You are a coding planner. Produce concise markdown with sections: Objective, "
-            "Steps, Risks, and Verification."
+
+        # --- gather context ---
+        project_ctx = build_project_context_block(self.repo_root, project_slug) if project_slug else ""
+
+        facts_ctx = ""
+        if project_slug:
+            facts = ProjectContextMemory(self.repo_root).get_facts(project_slug)
+            if facts:
+                lines = ["Accumulated project facts:"]
+                for k, v in list(facts.items())[:14]:
+                    lines.append(f"  {k}: {v}")
+                facts_ctx = "\n".join(lines)
+
+        file_tree = _scan_workspace_tree(workspace) if workspace else ""
+
+        research_ctx = (
+            read_research_context(self.repo_root, project_slug, max_summaries=1, chars_per_summary=2000)
+            if project_slug else ""
         )
-        user = prompt.strip() or "Generate a plan for the active coding project."
+
+        prior_plan_ctx = ""
+        if project_slug:
+            prior = self.plan_store.latest_plan(project_slug)
+            if prior and prior.body_md and not prior.executed_at:
+                prior_plan_ctx = f"Most recent plan ({prior.id}, not yet executed):\n{prior.body_md[:1500]}"
+            elif prior and prior.body_md:
+                prior_plan_ctx = f"Most recent plan ({prior.id}, already executed):\n{prior.body_md[:800]}"
+
+        system = (
+            "You are a senior software engineer producing an actionable implementation plan for a coding project. "
+            "You have access to the project's full context: its description, tech stack, workspace file tree, "
+            "research findings, and prior planning history. "
+            "Your plan must be SPECIFIC and FILE-LEVEL — not generic advice. "
+            "Every implementation step must name a real file path from the workspace tree and describe "
+            "exactly what to add, change, or remove in that file (function names, class names, config keys). "
+            "Do not recommend inspecting or reading files as a step — go straight to what needs to change. "
+            "Output format (markdown, no fenced code blocks):\n"
+            "## Context — one paragraph on project state and why this change is needed\n"
+            "## Objective — one sentence on what this plan delivers\n"
+            "## Files to Change — bullet list: `path/to/file.py` — what changes and why\n"
+            "## Implementation Steps — numbered, each tied to a specific file path\n"
+            "## Verification — how to confirm it works end-to-end"
+        )
+
+        workspace_kb = (
+            read_workspace_knowledge(
+                workspace,
+                default_design_path=self.repo_root / "DESIGN.md",
+                default_patterns_path=resolve_default_patterns_path(self.repo_root, project_stack),
+            )
+            if workspace
+            else ""
+        )
+
+        parts: list[str] = [f"Planning request: {(prompt.strip() or 'Plan the next coding work for this project.')}"]
+        if project_ctx:
+            parts.append(project_ctx)
+        if workspace_kb:
+            parts.append(f"Project knowledge (from workspace docs):\n{workspace_kb}")
+        if facts_ctx:
+            parts.append(facts_ctx)
+        if file_tree:
+            parts.append(f"Workspace file tree:\n{file_tree}")
+        if research_ctx:
+            parts.append(f"Research context (recent summaries):\n{research_ctx}")
+        if prior_plan_ctx:
+            parts.append(prior_plan_ctx)
+        user = "\n\n".join(parts)
+
         try:
             orch = FoxforgeOrchestrator(self.repo_root)
-            text = orch.ollama.chat(model, system, user, temperature=0.2, num_ctx=8192, think=True)
+            text = orch.ollama.chat(
+                model, system, user,
+                temperature=0.15,
+                num_ctx=12288,
+                think=True,
+                timeout=1200,
+            )
             if text.strip():
                 return text.strip()
-        except Exception:
-            pass
-        return "\n".join([
-            "# Plan",
-            "",
-            f"Prompt: {user}",
-            "",
-            "## Objective",
-            "Implement the requested coding change safely.",
-            "",
-            "## Steps",
-            "1. Inspect relevant files.",
-            "2. Apply code edits.",
-            "3. Run import/test checks.",
-            "",
-            "## Risks",
-            "- Stale assumptions if workspace changed.",
-            "",
-            "## Verification",
-            "- Run the relevant command and confirm output.",
-        ])
+        except Exception as exc:
+            return f"# Plan\n\nPrompt: {prompt.strip()}\n\n_Plan generation failed: {exc}_"
+        return f"# Plan\n\nPrompt: {prompt.strip()}\n\n_Plan generation returned empty output._"
 
     def _resolve_plan_ref(self, project_slug: str, ref: str) -> Any:
         key = str(ref or "latest").strip().lower() or "latest"
@@ -529,13 +721,25 @@ class CommandDispatcher:
             if old is None:
                 return CommandOutcome(f"Plan not found: {ref}", error=True, active_project_slug=state.active_project_slug)
             prompt = old.prompt or old.body_md[:300]
-            body = self._generate_plan_markdown(prompt, kind=old.kind or "deep")
+            body = self._generate_plan_markdown(
+                prompt,
+                kind=old.kind or "deep",
+                project_slug=project_slug,
+                workspace=workspace,
+                project_stack=dict(project.get("stack") or {}),
+            )
             new_id = self.plan_store.create_plan(project_slug, old.kind or "deep", prompt, body, workspace_path=workspace)
             self.plan_store.supersede(old.id, new_id)
             return CommandOutcome(f"Refreshed plan {old.id} -> {new_id}", active_project_slug=state.active_project_slug)
 
         prompt = " ".join(args).strip() or f"Plan next coding work for project {project_slug}."
-        body = self._generate_plan_markdown(prompt, kind="deep")
+        body = self._generate_plan_markdown(
+            prompt,
+            kind="deep",
+            project_slug=project_slug,
+            workspace=workspace,
+            project_stack=dict(project.get("stack") or {}),
+        )
         plan_id = self.plan_store.create_plan(project_slug, "deep", prompt, body, workspace_path=workspace)
         return CommandOutcome(f"Created plan {plan_id}\n\n{body}", active_project_slug=state.active_project_slug)
 
@@ -578,7 +782,13 @@ class CommandDispatcher:
         workspace = str(project.get("workspace_path") or "")
         prompt = " ".join(args).strip() or f"Build next increment for project {project_slug}."
 
-        body = self._generate_plan_markdown(prompt, kind="shallow")
+        body = self._generate_plan_markdown(
+            prompt,
+            kind="shallow",
+            project_slug=project_slug,
+            workspace=workspace,
+            project_stack=dict(project.get("stack") or {}),
+        )
         plan_id = self.plan_store.create_plan(project_slug, "shallow", prompt, body, workspace_path=workspace)
         execute_out = self._cmd_execute(["--plan", plan_id], state)
         if execute_out.error:

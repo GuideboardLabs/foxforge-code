@@ -28,7 +28,9 @@ from agents_research.synthesizer import SynthesisUnavailableError, synthesize, r
 from shared_tools.file_store import ProjectStore
 from shared_tools.inference_router import InferenceRouter
 from shared_tools.model_routing import lane_model_config
+from shared_tools.project_engine import ProjectEngine
 from shared_tools.web_research import build_web_progress_payload
+from shared_tools.workspace_knowledge import read_workspace_knowledge, resolve_default_patterns_path
 from .agent_contracts import AgentTask
 
 LOGGER = logging.getLogger(__name__)
@@ -70,6 +72,23 @@ def _is_stack_decided_question(text: str, topic_type: str) -> bool:
     return any(re.search(pattern, low) for pattern in pair_patterns)
 
 
+def _resolve_research_intent(
+    *,
+    research_intent: str,
+    forage_profile: str,
+    lane: str,
+    topic_type: str,
+) -> str:
+    explicit = str(research_intent or "").strip().lower()
+    if explicit:
+        return explicit
+    if str(forage_profile or "").strip().lower() == "domain":
+        return "domain_foraging"
+    if str(lane or "").strip().lower() == "project" or str(topic_type or "").strip().lower() == "technical":
+        return "technical_planning"
+    return "general_research"
+
+
 class ResearchService:
     """Encapsulates research-lane orchestration while preserving legacy behavior.
 
@@ -92,6 +111,7 @@ class ResearchService:
         turn_plan: Any,
         force_research: bool,
         forage_profile: str = "technical",
+        research_intent: str = "",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -125,6 +145,7 @@ class ResearchService:
             history=history,
             topic_type=topic_type,
             forage_profile=forage_profile,
+            research_intent=research_intent,
             cancel_checker=cancel_checker,
             pause_checker=pause_checker,
             yield_checker=yield_checker,
@@ -148,6 +169,7 @@ class ResearchService:
         reminder_note: str = "",
         event_note: str = "",
         details_sink: dict[str, Any] | None = None,
+        research_intent: str = "",
     ) -> str:
         if self._is_cancelled(cancel_checker):
             return "Request cancelled before project-research execution started."
@@ -179,6 +201,12 @@ class ResearchService:
                 topic_type=topic_type,
                 web_context=web_context,
                 project_context=project_context,
+                research_intent=_resolve_research_intent(
+                    research_intent=research_intent,
+                    forage_profile="technical",
+                    lane="project",
+                    topic_type=topic_type,
+                ),
                 cancel_checker=cancel_checker,
                 pause_checker=pause_checker,
                 yield_checker=yield_checker,
@@ -288,6 +316,7 @@ class ResearchService:
         history: list[dict[str, str]] | None,
         topic_type: str,
         forage_profile: str = "technical",
+        research_intent: str = "",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -313,6 +342,7 @@ class ResearchService:
                 history=history,
                 topic_type=topic_type,
                 forage_profile=forage_profile,
+                research_intent=research_intent,
                 cancel_checker=cancel_checker,
                 pause_checker=pause_checker,
                 yield_checker=yield_checker,
@@ -335,6 +365,7 @@ class ResearchService:
         history: list[dict[str, str]] | None,
         topic_type: str,
         forage_profile: str = "technical",
+        research_intent: str = "",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -350,6 +381,7 @@ class ResearchService:
             lane=lane,
             topic_type=topic_type,
             forage_profile=forage_profile,
+            research_intent=research_intent,
             progress_callback=progress_callback,
         )
         self._emit_web_progress(progress_callback, web_details)
@@ -361,6 +393,12 @@ class ResearchService:
             web_context=web_context,
             project_context=project_context,
             forage_profile=forage_profile,
+            research_intent=_resolve_research_intent(
+                research_intent=research_intent,
+                forage_profile=forage_profile,
+                lane=lane,
+                topic_type=topic_type,
+            ),
             cancel_checker=cancel_checker,
             pause_checker=pause_checker,
             yield_checker=yield_checker,
@@ -413,20 +451,51 @@ class ResearchService:
         lane: str,
         topic_type: str,
         forage_profile: str = "technical",
+        research_intent: str = "",
         progress_callback=None,
     ) -> tuple[str, str, dict[str, Any], str]:
         lane_key = str(lane or "research").strip().lower() or "research"
         project_slug = str(getattr(host, "project_slug", "") or "").strip() or "general"
         project_context = build_project_context_block(self.repo_root, project_slug)
+        workspace_context = ""
+        try:
+            project = ProjectEngine(self.repo_root).get_by_slug(project_slug)
+            workspace_path = str(project.get("workspace_path") or "").strip() if isinstance(project, dict) else ""
+            if workspace_path:
+                workspace_context = read_workspace_knowledge(
+                    workspace_path,
+                    max_chars=4000,
+                    default_design_path=self.repo_root / "DESIGN.md",
+                    default_patterns_path=resolve_default_patterns_path(
+                        self.repo_root,
+                        dict(project.get("stack") or {}) if isinstance(project, dict) else None,
+                    ),
+                )
+        except Exception:
+            workspace_context = ""
+
+        persona_project_context = project_context
+        if workspace_context:
+            persona_project_context = (
+                f"{project_context}\n\nWorkspace knowledge:\n{workspace_context}"
+                if project_context
+                else f"Workspace knowledge:\n{workspace_context}"
+            )
         planner_client = InferenceRouter(self.repo_root)
 
         try:
             persona_queries = generate_persona_queries(
                 question=text,
-                project_context=project_context,
+                project_context=persona_project_context,
                 client=planner_client,
                 repo_root=self.repo_root,
                 forage_profile=forage_profile,
+                research_intent=_resolve_research_intent(
+                    research_intent=research_intent,
+                    forage_profile=forage_profile,
+                    lane=lane,
+                    topic_type=topic_type,
+                ),
             )
         except Exception:
             persona_queries = []
@@ -605,6 +674,7 @@ class ResearchService:
         web_context: str,
         project_context: str = "",
         forage_profile: str = "technical",
+        research_intent: str = "",
         cancel_checker=None,
         pause_checker=None,
         yield_checker=None,
@@ -622,6 +692,7 @@ class ResearchService:
                         "topic_type": topic_type,
                         "project_context": project_context,
                         "forage_profile": forage_profile,
+                        "research_intent": research_intent,
                     },
                     cancel_checker=cancel_checker,
                     pause_checker=pause_checker,
@@ -644,6 +715,8 @@ class ResearchService:
                 topic_type=topic_type,
                 project_context=project_context,
                 forage_profile=forage_profile,
+                research_intent=research_intent,
+                workspace_knowledge=str(project_context or ""),
             )
         raise RuntimeError("No research pool executor is available.")
 

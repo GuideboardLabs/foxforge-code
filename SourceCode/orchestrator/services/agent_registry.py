@@ -39,6 +39,8 @@ class ResearchPoolAgent(BaseAgentExecutor):
             topic_type=str(task.context.get("topic_type", "general") or "general"),
             project_context=str(task.context.get("project_context", "") or ""),
             forage_profile=str(task.context.get("forage_profile", "technical") or "technical"),
+            research_intent=str(task.context.get("research_intent", "") or ""),
+            workspace_knowledge=str(task.context.get("workspace_knowledge", "") or ""),
         )
         return WorkerResult.from_legacy("research", result)
 

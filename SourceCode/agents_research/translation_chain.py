@@ -35,6 +35,15 @@ CHAIN_STAGES: list[dict[str, str]] = [
     },
 ]
 
+RECOMMENDATION_STRENGTH_LABELS = {
+    "implement_now",
+    "prototype",
+    "design_option",
+    "future_experiment",
+    "weak_do_not_prioritize",
+    "reject",
+}
+
 
 def _plain(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip()).lower()
@@ -93,6 +102,7 @@ def run_translation_chain(
     repo_root: Path,
     synthesis_cfg: dict[str, Any] | None = None,
     use_premium_tech_lead: bool = False,
+    primitives: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run PM -> Market -> Project Manager -> Tech Lead translation stages."""
     cfg = dict(synthesis_cfg or lane_model_config(repo_root, "synthesis") or {})
@@ -118,6 +128,7 @@ def run_translation_chain(
             f"Research question:\n{str(question or '').strip()}\n\n"
             f"Synthesis summary:\n{str(synthesis_summary or '').strip()[:6000]}\n\n"
             f"Project context:\n{str(project_context or '').strip() or 'none'}\n\n"
+            f"Domain Primitives:\n{json.dumps(primitives or {}, ensure_ascii=True)[:3000] or 'none'}\n\n"
             f"Prior stage outputs:\n{prior_text or 'none'}\n\n"
             f"Your role: {label}\n"
             f"Role focus: {stage['focus']}\n\n"
@@ -174,6 +185,32 @@ def run_translation_chain(
     chain_sections = ["## Project Implications"]
     for row in stage_outputs:
         chain_sections.append(_render_stage(str(row["label"]), str(row["content"])))
+
+    recommendations = _classify_recommendation_strength(
+        question=question,
+        project_context=project_context,
+        synthesis_summary=synthesis_summary,
+        stage_outputs=stage_outputs,
+        primitives=primitives,
+        client=client,
+        cfg=cfg,
+    )
+    if recommendations:
+        chain_sections.append("## Recommended Actions (with strength labels)")
+        for row in recommendations:
+            finding = str(row.get("finding", "")).strip()
+            implication = str(row.get("implication", "")).strip()
+            strength = str(row.get("strength", "")).strip().lower()
+            rationale = str(row.get("rationale", "")).strip()
+            if strength not in RECOMMENDATION_STRENGTH_LABELS:
+                strength = "design_option"
+            text = finding or implication or "Action candidate"
+            if implication and implication != finding:
+                text = f"{text} -> {implication}"
+            if rationale:
+                text = f"{text} ({rationale})"
+            chain_sections.append(f"- {text} - strength: {strength}")
+
     chain_block = "\n\n".join(chain_sections)
 
     base = str(synthesis_summary or "").strip()
@@ -190,7 +227,85 @@ def run_translation_chain(
     return {
         "summary": base,
         "stages": stage_outputs,
+        "recommendations": recommendations,
     }
+
+
+def _classify_recommendation_strength(
+    *,
+    question: str,
+    project_context: str,
+    synthesis_summary: str,
+    stage_outputs: list[dict[str, str]],
+    primitives: dict[str, Any] | None,
+    client: Any,
+    cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    model = str(cfg.get("model", "qwen3:8b")).strip() or "qwen3:8b"
+    fallback = cfg.get("fallback_models", []) if isinstance(cfg.get("fallback_models", []), list) else []
+    stage_blob = "\n\n".join(
+        f"{str(row.get('label', 'stage'))}:\n{str(row.get('content', '')).strip()}"
+        for row in stage_outputs
+    ).strip()
+    system_prompt = (
+        "You classify recommendation strength for project implications. "
+        "Return ONLY JSON list where each row has: finding, implication, strength, rationale, evidence_ref, primitive_ref. "
+        "Allowed strength labels: implement_now, prototype, design_option, future_experiment, weak_do_not_prioritize, reject."
+    )
+    user_prompt = (
+        f"Question:\n{question}\n\n"
+        f"Project context:\n{project_context or 'none'}\n\n"
+        f"Synthesis summary:\n{synthesis_summary[:5000]}\n\n"
+        f"Domain primitives:\n{json.dumps(primitives or {}, ensure_ascii=True)[:2800] or 'none'}\n\n"
+        f"Translation stages:\n{stage_blob[:6000]}\n"
+    )
+    try:
+        raw = str(
+            client.chat(
+                model=model,
+                fallback_models=fallback,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=0.1,
+                num_ctx=int(cfg.get("num_ctx", 12288) or 12288),
+                think=False,
+                timeout=int(cfg.get("timeout_sec", 420) or 420),
+                retry_attempts=1,
+                retry_backoff_sec=1.0,
+                task_class="recommendation_strength",
+                tier="default",
+            )
+            or ""
+        ).strip()
+        candidate = raw
+        if not candidate.startswith("["):
+            m = re.search(r"\[[\s\S]*\]", candidate)
+            if m:
+                candidate = m.group(0)
+        parsed = json.loads(candidate)
+        if not isinstance(parsed, list):
+            return []
+    except Exception:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in parsed:
+        if not isinstance(row, dict):
+            continue
+        strength = str(row.get("strength", "")).strip().lower()
+        if strength not in RECOMMENDATION_STRENGTH_LABELS:
+            continue
+        out.append(
+            {
+                "finding": str(row.get("finding", "")).strip(),
+                "implication": str(row.get("implication", "")).strip(),
+                "strength": strength,
+                "rationale": str(row.get("rationale", "")).strip(),
+                "evidence_ref": list(row.get("evidence_ref", [])) if isinstance(row.get("evidence_ref", []), list) else [],
+                "primitive_ref": list(row.get("primitive_ref", [])) if isinstance(row.get("primitive_ref", []), list) else [],
+            }
+        )
+    return out[:18]
 
 
 def ensure_project_specificity(summary_md: str, project_context: str) -> str:
@@ -269,16 +384,18 @@ def enforce_final_summary_contract(
             bucket_parts.append("### Analogies [A]")
             bucket_parts.extend(f"- {row}" for row in analogy_bullets)
         if bucket_parts:
-            sections.append("## Evidence Signals")
+            sections.append("## Evidence / Inference / Speculation Buckets")
             sections.extend(bucket_parts)
 
     if not re.search(r"^##\s+Recommended\s+Actions\b", summary, flags=re.IGNORECASE | re.MULTILINE):
         next_steps = _extract_bullets(
             "\n".join([ln for ln in summary.splitlines() if re.search(r"next steps", ln, re.IGNORECASE)])
         )
+        sections.append("## Recommended Actions")
         if next_steps:
-            sections.append("## Recommended Actions")
             sections.extend(f"- {row}" for row in next_steps)
+        else:
+            sections.append("- No explicit action list was generated in this pass.")
 
     if not re.search(r"^##\s+Insights?\b", summary, flags=re.IGNORECASE | re.MULTILINE):
         sections.extend(
@@ -341,6 +458,7 @@ def enforce_final_summary_contract(
 
 __all__ = [
     "CHAIN_STAGES",
+    "RECOMMENDATION_STRENGTH_LABELS",
     "enforce_final_summary_contract",
     "ensure_project_specificity",
     "run_translation_chain",
